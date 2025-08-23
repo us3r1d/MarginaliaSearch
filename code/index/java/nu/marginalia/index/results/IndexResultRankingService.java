@@ -12,13 +12,14 @@ import nu.marginalia.api.searchquery.model.compiled.CompiledQuery;
 import nu.marginalia.api.searchquery.model.compiled.CqDataLong;
 import nu.marginalia.api.searchquery.model.query.SearchPhraseConstraint;
 import nu.marginalia.api.searchquery.model.query.SearchQuery;
-import nu.marginalia.api.searchquery.model.results.ResultRankingContext;
 import nu.marginalia.api.searchquery.model.results.SearchResultItem;
 import nu.marginalia.api.searchquery.model.results.debug.DebugRankingFactors;
+import nu.marginalia.index.forward.spans.DocumentSpans;
 import nu.marginalia.index.index.CombinedIndexReader;
 import nu.marginalia.index.index.StatefulIndex;
-import nu.marginalia.index.model.SearchParameters;
+import nu.marginalia.index.model.ResultRankingContext;
 import nu.marginalia.index.model.SearchTermsUtil;
+import nu.marginalia.index.query.IndexSearchBudget;
 import nu.marginalia.index.results.model.PhraseConstraintGroupList;
 import nu.marginalia.index.results.model.QuerySearchTerms;
 import nu.marginalia.index.results.model.ids.CombinedDocIdList;
@@ -30,9 +31,15 @@ import nu.marginalia.sequence.CodedSequence;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
 import java.lang.foreign.Arena;
 import java.sql.SQLException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Singleton
 public class IndexResultRankingService {
@@ -52,96 +59,146 @@ public class IndexResultRankingService {
         this.domainRankingOverrides = domainRankingOverrides;
     }
 
-    public List<SearchResultItem> rankResults(SearchParameters params,
-                                              boolean exportDebugData,
-                                              ResultRankingContext rankingContext,
-                                              CombinedDocIdList resultIds)
-    {
-        if (resultIds.isEmpty())
-            return List.of();
+    public RankingData prepareRankingData(ResultRankingContext rankingContext, CombinedDocIdList resultIds, @Nullable IndexSearchBudget budget) throws TimeoutException {
+        return new RankingData(rankingContext, resultIds, budget);
+    }
 
-        IndexResultScoreCalculator resultRanker = new IndexResultScoreCalculator(statefulIndex, domainRankingOverrides, rankingContext, params);
+    public final class RankingData implements AutoCloseable {
+        final Arena arena;
 
-        List<SearchResultItem> results = new ArrayList<>(resultIds.size());
+        private final TermMetadataList[] termsForDocs;
+        private final DocumentSpans[] documentSpans;
+        private final long[] flags;
+        private final CodedSequence[] positions;
+        private final CombinedDocIdList resultIds;
+        private final QuerySearchTerms searchTerms;
+        private AtomicBoolean closed = new AtomicBoolean(false);
+        int pos = -1;
 
-        // Get the current index reader, which is the one we'll use for this calculation,
-        // this may change during the calculation, but we don't want to switch over mid-calculation
-        final CombinedIndexReader currentIndex = statefulIndex.get();
+        public RankingData(ResultRankingContext rankingContext, CombinedDocIdList resultIds, @Nullable IndexSearchBudget budget) throws TimeoutException {
+            this.resultIds = resultIds;
+            this.arena = Arena.ofShared();
 
-        final QuerySearchTerms searchTerms = getSearchTerms(params.compiledQuery, params.query);
-        final int termCount = searchTerms.termIdsAll.size();
+            this.searchTerms = getSearchTerms(rankingContext.compiledQuery, rankingContext.searchQuery);
+            final int termCount = searchTerms.termIdsAll.size();
 
-        // We use an arena for the position data to avoid gc pressure
-        // from the gamma coded sequences, which can be large and have a lifetime
-        // that matches the try block here
-        try (var arena = Arena.ofConfined()) {
+            this.flags = new long[termCount];
+            this.positions = new CodedSequence[termCount];
 
-            TermMetadataList[] termsForDocs = new TermMetadataList[termCount];
-            for (int ti = 0; ti < termCount; ti++) {
-                termsForDocs[ti] = currentIndex.getTermMetadata(arena, searchTerms.termIdsAll.at(ti), resultIds);
+            // Get the current index reader, which is the one we'll use for this calculation,
+            // this may change during the calculation, but we don't want to switch over mid-calculation
+
+            final CombinedIndexReader currentIndex = statefulIndex.get();
+
+            // Perform expensive I/O operations
+
+            try {
+                this.termsForDocs = currentIndex.getTermMetadata(arena, budget, searchTerms.termIdsAll.array, resultIds);
+                this.documentSpans = currentIndex.getDocumentSpans(arena, budget, resultIds);
             }
+            catch (TimeoutException|RuntimeException ex) {
+                arena.close();
+                throw ex;
+            }
+        }
 
-            // Data for the document.  We arrange this in arrays outside the calculation function to avoid
-            // hash lookups in the inner loop, as it's hot code, and we don't want unnecessary cpu cache
-            // thrashing in there; out here we can rely on implicit array ordering to match up the data.
+        public CodedSequence[] positions() {
+            return positions;
+        }
+        public long[] flags() {
+            return flags;
+        }
+        public long resultId() {
+            return resultIds.at(pos);
+        }
+        public DocumentSpans documentSpans() {
+            return documentSpans[pos];
+        }
 
-            long[] flags = new long[termCount];
-            CodedSequence[] positions = new CodedSequence[termCount];
-
-            // Iterate over documents by their index in the combinedDocIds, as we need the index for the
-            // term data arrays as well
-
-            for (int i = 0; i < resultIds.size(); i++) {
-
-                // Prepare term-level data for the document
+        public boolean next() {
+            if (++pos < resultIds.size()) {
                 for (int ti = 0; ti < flags.length; ti++) {
                     var tfd = termsForDocs[ti];
 
                     assert tfd != null : "No term data for term " + ti;
 
-                    flags[ti] = tfd.flag(i);
-                    positions[ti] = tfd.position(i);
+                    flags[ti] = tfd.flag(pos);
+                    positions[ti] = tfd.position(pos);
                 }
+                return true;
+            }
+            return false;
+        }
 
-                // Ignore documents that don't match the mandatory constraints
-                if (!searchTerms.phraseConstraints.testMandatory(positions)) {
-                    continue;
-                }
+        public int size() {
+            return resultIds.size();
+        }
 
-                if (!exportDebugData) {
-                    var score = resultRanker.calculateScore(arena, null, resultIds.at(i), searchTerms, flags, positions);
-                    if (score != null) {
-                        results.add(score);
-                    }
-                }
-                else {
-                    var rankingFactors = new DebugRankingFactors();
-                    var score = resultRanker.calculateScore(arena, rankingFactors, resultIds.at(i), searchTerms, flags, positions);
-                    if (score != null) {
-                        score.debugRankingFactors = rankingFactors;
-                        results.add(score);
-                    }
-                }
+        public void close() {
+            if (closed.compareAndSet(false, true)) {
+                arena.close();
+            }
+        }
+
+    }
+
+    public List<SearchResultItem> rankResults(
+            IndexSearchBudget budget,
+            ResultRankingContext rankingContext,
+            RankingData rankingData,
+            boolean exportDebugData)
+    {
+        IndexResultScoreCalculator resultRanker = new IndexResultScoreCalculator(statefulIndex, domainRankingOverrides, rankingContext);
+
+        List<SearchResultItem> results = new ArrayList<>(rankingData.size());
+
+        // Iterate over documents by their index in the combinedDocIds, as we need the index for the
+        // term data arrays as well
+
+        var searchTerms = rankingData.searchTerms;
+
+        while (rankingData.next() && budget.hasTimeLeft()) {
+
+            // Ignore documents that don't match the mandatory constraints
+            if (!searchTerms.phraseConstraints.testMandatory(rankingData.positions())) {
+                continue;
             }
 
-            return results;
+            if (!exportDebugData) {
+                var score = resultRanker.calculateScore(null, rankingData.resultId(), searchTerms, rankingData.flags(), rankingData.positions(), rankingData.documentSpans());
+                if (score != null) {
+                    results.add(score);
+                }
+            }
+            else {
+                var rankingFactors = new DebugRankingFactors();
+                var score = resultRanker.calculateScore( rankingFactors, rankingData.resultId(), searchTerms, rankingData.flags(), rankingData.positions(), rankingData.documentSpans());
+
+                if (score != null) {
+                    score.debugRankingFactors = rankingFactors;
+                    results.add(score);
+                }
+            }
         }
+
+        return results;
     }
 
 
-    public List<RpcDecoratedResultItem> selectBestResults(SearchParameters params,
+    public List<RpcDecoratedResultItem> selectBestResults(int limitByDomain,
+                                                          int limitTotal,
                                                           ResultRankingContext resultRankingContext,
-                                                          Collection<SearchResultItem> results) throws SQLException {
+                                                          List<SearchResultItem> results) throws SQLException {
 
-        var domainCountFilter = new IndexResultDomainDeduplicator(params.limitByDomain);
+        var domainCountFilter = new IndexResultDomainDeduplicator(limitByDomain);
 
         List<SearchResultItem> resultsList = new ArrayList<>(results.size());
-        TLongList idsList = new TLongArrayList(params.limitTotal);
+        TLongList idsList = new TLongArrayList(limitTotal);
 
         for (var item : results) {
             if (domainCountFilter.test(item)) {
 
-                if (resultsList.size() < params.limitTotal) {
+                if (resultsList.size() < limitTotal) {
                     resultsList.add(item);
                     idsList.add(item.getDocumentId());
                 }
@@ -159,19 +216,26 @@ public class IndexResultRankingService {
         // for the selected results, as this would be comically expensive to do for all the results we
         // discard along the way
 
-        if (params.rankingParams.getExportDebugData()) {
+        if (resultRankingContext.params.getExportDebugData()) {
             var combinedIdsList = new LongArrayList(resultsList.size());
             for (var item : resultsList) {
                 combinedIdsList.add(item.combinedId);
             }
 
             resultsList.clear();
-            resultsList.addAll(this.rankResults(
-                    params,
-                    true,
-                    resultRankingContext,
-                    new CombinedDocIdList(combinedIdsList))
-            );
+            IndexSearchBudget budget = new IndexSearchBudget(10000);
+            try (var data = prepareRankingData(resultRankingContext,  new CombinedDocIdList(combinedIdsList), null)) {
+                resultsList.addAll(this.rankResults(
+                        budget,
+                        resultRankingContext,
+                        data,
+                        true)
+                );
+            }
+            catch (TimeoutException ex) {
+                // this won't happen since we passed null for budget
+            }
+
         }
 
         // Fetch the document details for the selected results in one go, from the local document database
@@ -247,7 +311,7 @@ public class IndexResultRankingService {
 
                 var termOutputs = RpcResultTermRankingOutputs.newBuilder();
 
-                CqDataLong termIds = params.compiledQueryIds.data;;
+                CqDataLong termIds = resultRankingContext.compiledQueryIds.data;
 
                 for (var entry : debugFactors.getTermFactors()) {
                     String term = "[ERROR IN LOOKUP]";
@@ -255,7 +319,7 @@ public class IndexResultRankingService {
                     // CURSED: This is a linear search, but the number of terms is small, and it's in a debug path
                     for (int i = 0; i < termIds.size(); i++) {
                         if (termIds.get(i) == entry.termId()) {
-                            term = params.compiledQuery.at(i);
+                            term = resultRankingContext.compiledQuery.at(i);
                             break;
                         }
                     }

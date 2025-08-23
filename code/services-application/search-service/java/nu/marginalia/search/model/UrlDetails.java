@@ -107,11 +107,12 @@ public class UrlDetails implements Comparable<UrlDetails> {
 
         int distSinceBreak = 0;
 
-        char c = ' ';
+        int c = ' ';
         int prevC = ' ';
-        for (int i = 0; i < str.length(); i++) {
+        for (int i = 0; i < str.length();) {
             prevC = c;
-            c = str.charAt(i);
+            c = str.codePointAt(i);
+            i += Character.charCount(c);
 
             if (Character.isSpaceChar(c)) {
                 distSinceBreak = 0;
@@ -131,21 +132,21 @@ public class UrlDetails implements Comparable<UrlDetails> {
             }
             else if (!Character.isAlphabetic(c) && !Character.isWhitespace(c)) {
                 distSinceBreak = 0;
-                sb.append(c);
+                sb.appendCodePoint(c);
                 sb.append("&shy;");
             }
             else if (Character.isUpperCase(c) && Character.isLowerCase(prevC)) {
                 distSinceBreak = 0;
                 sb.append("&shy;");
-                sb.append(c);
+                sb.appendCodePoint(c);
             }
             else if (distSinceBreak > 16) {
                 distSinceBreak = 0;
                 sb.append("&shy;");
-                sb.append(c);
+                sb.appendCodePoint(c);
             }
             else {
-                sb.append(c);
+                sb.appendCodePoint(c);
             }
         }
     }
@@ -156,8 +157,10 @@ public class UrlDetails implements Comparable<UrlDetails> {
         StringBuilder sb = new StringBuilder();
 
         int distSinceSpace = 0;
-        for (int i = 0; i < description.length(); i++) {
-            char c = description.charAt(i);
+        for (int i = 0; i < description.length();) {
+            int c = description.codePointAt(i);
+            i += Character.charCount(c);
+
             if (Character.isSpaceChar(c)) {
                 distSinceSpace = 0;
             }
@@ -175,12 +178,17 @@ public class UrlDetails implements Comparable<UrlDetails> {
                 sb.append("&amp;");
             }
             else if (!Character.isAlphabetic(c) && distSinceSpace > 24) {
-                sb.append(c);
+                sb.appendCodePoint(c);
+                sb.append("&shy;");
+                distSinceSpace = 0;
+            }
+            else if (distSinceSpace > 48) {
+                sb.appendCodePoint(c);
                 sb.append("&shy;");
                 distSinceSpace = 0;
             }
             else {
-                sb.append(c);
+                sb.appendCodePoint(c);
             }
         }
 
@@ -205,11 +213,11 @@ public class UrlDetails implements Comparable<UrlDetails> {
                 sb.append("&amp;");
             }
             else if (!Character.isAlphabetic(c) && !Character.isWhitespace(c)) {
-                sb.append(c);
+                sb.appendCodePoint(c);
                 sb.append("&shy;");
             }
             else {
-                sb.append(c);
+                sb.appendCodePoint(c);
             }
         }
 
@@ -301,7 +309,7 @@ public class UrlDetails implements Comparable<UrlDetails> {
     }
 
     public boolean isAds() {
-        return HtmlFeature.hasFeature(features, HtmlFeature.TRACKING_ADTECH);
+        return HtmlFeature.hasFeature(features, HtmlFeature.ADVERTISEMENT);
     }
 
     public int getMatchRank() {
