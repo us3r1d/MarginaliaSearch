@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 @Singleton
@@ -32,9 +33,11 @@ public class ApiSearchOperator {
                                   int count,
                                   int domainCount,
                                   int index,
-                                  NsfwFilterTier filterTier)
+                                  NsfwFilterTier filterTier,
+                                  String langIsoCode)
+            throws TimeoutException
     {
-        var rsp = queryClient.search(createParams(query, count, domainCount, index, filterTier));
+        var rsp = queryClient.search(createParams(query, count, domainCount, index, filterTier, langIsoCode));
 
         return new ApiSearchResults("RESTRICTED", query,
                 rsp.results()
@@ -45,7 +48,12 @@ public class ApiSearchOperator {
                 .collect(Collectors.toList()));
     }
 
-    private QueryParams createParams(String query, int count, int domainCount, int index, NsfwFilterTier filterTirer) {
+    private QueryParams createParams(String query,
+                                     int count,
+                                     int domainCount,
+                                     int index,
+                                     NsfwFilterTier filterTirer,
+                                     String langIsoCode) {
         SearchSetIdentifier searchSet = selectSearchSet(index);
 
         return new QueryParams(
@@ -57,7 +65,8 @@ public class ApiSearchOperator {
                         .setFetchSize(8192)
                         .build(),
                 searchSet.name(),
-                filterTirer);
+                filterTirer,
+                langIsoCode);
     }
 
     private SearchSetIdentifier selectSearchSet(int index) {

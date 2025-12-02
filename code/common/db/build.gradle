@@ -4,7 +4,7 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'org.flywaydb:flyway-mysql:10.0.1'
+        classpath 'org.flywaydb:flyway-mysql:11.16.0'
     }
 }
 
@@ -12,7 +12,7 @@ plugins {
     id 'java'
 
     id 'jvm-test-suite'
-    id "org.flywaydb.flyway" version "10.0.1"
+    id "org.flywaydb.flyway" version "11.16.0"
 }
 
 java {
@@ -66,7 +66,7 @@ flyway {
     password = 'wmsa'
     schemas = ['WMSA_prod']
     configurations = [ 'compileClasspath', 'flywayMigration' ]
-    locations = ['filesystem:src/main/resources/db/migration']
+    locations = ['filesystem:resources/db/migration']
     cleanDisabled = false
 }
 

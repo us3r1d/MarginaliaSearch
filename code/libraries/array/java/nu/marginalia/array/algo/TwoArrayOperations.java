@@ -1,16 +1,45 @@
 package nu.marginalia.array.algo;
 
 import nu.marginalia.array.LongArray;
+import nu.marginalia.ffi.NativeAlgos;
 
 
 /** Functions for operating on pairs of arrays.
  */
 public class TwoArrayOperations {
 
+
+    public static long mergeArraysN(int n,
+                                    LongArray out, LongArray a, LongArray b,
+                                    long outStart,
+                                    long aStart, long aEnd,
+                                    long bStart, long bEnd) {
+
+        if (NativeAlgos.isAvailable) {
+            if (n == 1)
+                return NativeAlgos.mergeArrays1(out.getMemorySegment(), a.getMemorySegment(), b.getMemorySegment(), outStart, aStart, aEnd, bStart, bEnd);
+            if (n == 2)
+                return NativeAlgos.mergeArrays2(out.getMemorySegment(), a.getMemorySegment(), b.getMemorySegment(), outStart, aStart, aEnd, bStart, bEnd);
+            if (n == 3)
+                return NativeAlgos.mergeArrays3(out.getMemorySegment(), a.getMemorySegment(), b.getMemorySegment(), outStart, aStart, aEnd, bStart, bEnd);
+        }
+        else {
+            if (n == 1)
+                return mergeArrays1(out, a, b, outStart, aStart, aEnd, bStart, bEnd);
+            if (n == 2)
+                return mergeArrays2(out, a, b, outStart, aStart, aEnd, bStart, bEnd);
+            if (n == 3)
+                return mergeArrays3(out, a, b, outStart, aStart, aEnd, bStart, bEnd);
+        }
+        throw new UnsupportedOperationException("Implement a merge(n)");
+    }
+
+
     /**
      * Merge two sorted arrays into a third array, removing duplicates.
      */
-    public static long mergeArrays(LongArray out, LongArray a, LongArray b, long outStart, long aStart, long aEnd, long bStart, long bEnd) {
+    public static long mergeArrays1(LongArray out, LongArray a, LongArray b, long outStart, long aStart, long aEnd, long bStart, long bEnd) {
+
         // Ensure that the arrays are sorted and that the output array is large enough
         if (TwoArrayOperations.class.desiredAssertionStatus()) {
             assert (a.isSorted(aStart, aEnd));
@@ -69,6 +98,7 @@ public class TwoArrayOperations {
 
         return outPos - outStart;
     }
+
 
     /**
      * Merge two sorted arrays into a third array, removing duplicates.
@@ -155,6 +185,99 @@ public class TwoArrayOperations {
     }
 
     /**
+     * Merge two sorted arrays into a third array, removing duplicates.
+     * <p>
+     * The operation is performed with a step size of 3. For each pair of values,
+     * only the first is considered to signify a key. The second value is retained along
+     * with the first.  In the case of a duplicate, the value associated with array 'a'
+     * is retained, the other is discarded.
+     *
+     */
+    public static long mergeArrays3(LongArray out, LongArray a, LongArray b,
+                                    long outStart,
+                                    long aStart, long aEnd,
+                                    long bStart, long bEnd)
+    {
+        if (TwoArrayOperations.class.desiredAssertionStatus()) {
+            assert (a.isSortedN(3, aStart, aEnd));
+            assert (b.isSortedN(3, bStart, bEnd));
+        }
+
+        long aPos = aStart;
+        long bPos = bStart;
+        long outPos = outStart;
+
+        long lastValue = 0;
+
+        while (aPos < aEnd && bPos < bEnd) {
+            final long aVal = a.get(aPos);
+            final long bVal = b.get(bPos);
+
+            final long setVal;
+            final long setArg1;
+            final long setArg2;
+
+            if (aVal < bVal) {
+                setVal = aVal;
+                setArg1 = a.get(aPos + 1);
+                setArg2 = a.get(aPos + 2);
+
+                aPos+=3;
+            } else if (bVal < aVal) {
+                setVal = bVal;
+                setArg1 = b.get(bPos + 1);
+                setArg2 = b.get(bPos + 2);
+
+                bPos+=3;
+            } else {
+                setVal = aVal;
+                setArg1 = a.get(aPos + 1);
+                setArg2 = a.get(aPos + 2);
+
+                aPos+=3;
+                bPos+=3;
+            }
+
+            if (setVal != lastValue || outPos == outStart) {
+                out.set(outPos++, setVal);
+                out.set(outPos++, setArg1);
+                out.set(outPos++, setArg2);
+
+                lastValue = setVal;
+            }
+        }
+
+        while (aPos < aEnd) {
+            long val = a.get(aPos++);
+            long arg1 = a.get(aPos++);
+            long arg2 = a.get(aPos++);
+
+            if (val != lastValue || outPos == outStart) {
+                out.set(outPos++, val);
+                out.set(outPos++, arg1);
+                out.set(outPos++, arg2);
+                lastValue = val;
+            }
+        }
+
+        while (bPos < bEnd) {
+            long val = b.get(bPos++);
+            long arg1 = b.get(bPos++);
+            long arg2 = b.get(bPos++);
+
+            if (val != lastValue || outPos == outStart) {
+                out.set(outPos++, val);
+                out.set(outPos++, arg1);
+                out.set(outPos++, arg2);
+
+                lastValue = val;
+            }
+        }
+
+        return outPos - outStart;
+    }
+
+    /**
      * Count the number of distinct elements in two sorted arrays.
      */
     public static long countDistinctElements(LongArray a, LongArray b, long aStart, long aEnd, long bStart, long bEnd) {
@@ -164,7 +287,12 @@ public class TwoArrayOperations {
             assert (b.isSorted(bStart, bEnd));
         }
 
-        return countDistinctElementsDirect(a, b, aStart, aEnd, bStart, bEnd);
+        if (NativeAlgos.isAvailable) {
+            return NativeAlgos.countDistinct(a.getMemorySegment(), b.getMemorySegment(), aStart, aEnd, bStart, bEnd);
+        }
+        else {
+            return countDistinctElementsJava(a, b, aStart, aEnd, bStart, bEnd);
+        }
     }
 
     /**
@@ -177,7 +305,7 @@ public class TwoArrayOperations {
             assert (b.isSortedN(stepSize, bStart, bEnd));
         }
 
-        return countDistinctElementsDirectN(stepSize,
+        return countDistinctElementsJavaN(stepSize,
                 a,
                 b,
                 aStart,
@@ -186,7 +314,7 @@ public class TwoArrayOperations {
                 bEnd);
     }
 
-    private static long countDistinctElementsDirect(LongArray a, LongArray b, long aStart, long aEnd, long bStart, long bEnd) {
+    public static long countDistinctElementsJava(LongArray a, LongArray b, long aStart, long aEnd, long bStart, long bEnd) {
         long aPos = aStart;
         long bPos = bStart;
 
@@ -238,7 +366,7 @@ public class TwoArrayOperations {
         return distinct;
     }
 
-    private static long countDistinctElementsDirectN(int stepSize, LongArray a, LongArray b, long aStart, long aEnd, long bStart, long bEnd) {
+    private static long countDistinctElementsJavaN(int stepSize, LongArray a, LongArray b, long aStart, long aEnd, long bStart, long bEnd) {
         long aPos = aStart;
         long bPos = bStart;
 

@@ -12,7 +12,6 @@ import nu.marginalia.db.DbDomainQueries;
 import nu.marginalia.model.EdgeDomain;
 import nu.marginalia.model.EdgeUrl;
 import nu.marginalia.model.crawl.DomainIndexingState;
-import nu.marginalia.search.command.SearchParameters;
 import nu.marginalia.search.model.*;
 import nu.marginalia.search.results.UrlDeduplicator;
 import nu.marginalia.search.svc.SearchQueryCountService;
@@ -31,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -71,7 +71,7 @@ public class SearchOperator {
     public SimpleSearchResults doSiteSearch(String domain,
                                         int domainId,
                                         int count,
-                                        int page) {
+                                        int page) throws TimeoutException {
 
         var queryParams = paramFactory.forSiteSearch(domain, domainId, count, page);
         var queryResponse = queryClient.search(queryParams);
@@ -79,7 +79,7 @@ public class SearchOperator {
         return getResultsFromQuery(queryResponse);
     }
 
-    public SimpleSearchResults doBacklinkSearch(String domain, int page) {
+    public SimpleSearchResults doBacklinkSearch(String domain, int page) throws TimeoutException {
 
         var queryParams = paramFactory.forBacklinkSearch(domain, page);
         var queryResponse = queryClient.search(queryParams);
@@ -88,14 +88,14 @@ public class SearchOperator {
         return getResultsFromQuery(queryResponse);
     }
 
-    public SimpleSearchResults doLinkSearch(String source, String dest) {
+    public SimpleSearchResults doLinkSearch(String source, String dest) throws TimeoutException {
         var queryParams = paramFactory.forLinkSearch(source, dest);
         var queryResponse = queryClient.search(queryParams);
 
         return getResultsFromQuery(queryResponse);
     }
 
-    public DecoratedSearchResults doSearch(SearchParameters userParams) throws InterruptedException {
+    public DecoratedSearchResults doSearch(SearchParameters userParams) throws InterruptedException, TimeoutException {
         // The full user-facing search query does additional work to try to evaluate the query
         // e.g. as a unit conversion query. This is done in parallel with the regular search.
 
@@ -141,6 +141,7 @@ public class SearchOperator {
                 .problems(problems)
                 .evalResult(evalResult)
                 .results(clusteredResults)
+                .languageIsoCode(userParams.languageIsoCode())
                 .filters(new SearchFilters(userParams))
                 .focusDomain(focusDomain)
                 .focusDomainId(focusDomainId)

@@ -2,6 +2,7 @@ plugins {
     id 'java'
 
     id 'application'
+    id 'com.gradleup.shadow'
     id 'jvm-test-suite'
     id 'com.google.cloud.tools.jib' version '3.4.5'
 }
@@ -39,8 +40,7 @@ dependencies {
 
     implementation project(':code:libraries:domain-lock')
     implementation project(':code:libraries:geo-ip')
-    implementation project(':code:libraries:language-processing')
-    implementation project(':code:libraries:term-frequency-dict')
+    implementation project(':code:functions:language-processing')
 
     implementation project(':third-party:symspell')
 

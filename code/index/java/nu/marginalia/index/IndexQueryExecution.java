@@ -3,14 +3,11 @@ package nu.marginalia.index;
 import io.prometheus.client.Gauge;
 import nu.marginalia.api.searchquery.RpcDecoratedResultItem;
 import nu.marginalia.array.page.LongQueryBuffer;
-import nu.marginalia.index.index.CombinedIndexReader;
-import nu.marginalia.index.model.ResultRankingContext;
-import nu.marginalia.index.model.SearchParameters;
-import nu.marginalia.index.model.SearchTerms;
-import nu.marginalia.index.query.IndexQuery;
-import nu.marginalia.index.query.IndexSearchBudget;
+import nu.marginalia.index.model.CombinedDocIdList;
+import nu.marginalia.index.model.SearchContext;
 import nu.marginalia.index.results.IndexResultRankingService;
-import nu.marginalia.index.results.model.ids.CombinedDocIdList;
+import nu.marginalia.index.reverse.query.IndexQuery;
+import nu.marginalia.index.reverse.query.IndexSearchBudget;
 import nu.marginalia.skiplist.SkipListConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,22 +23,26 @@ public class IndexQueryExecution {
 
     private static final int indexValuationThreads = Integer.getInteger("index.valuationThreads", 8);
     private static final int indexPreparationThreads = Integer.getInteger("index.preparationThreads", 2);
+    private static final boolean printDebugSummary = Boolean.getBoolean("index.printDebugSummary");
+
+    private static final int maxSimultaneousQueries = Integer.getInteger("index.maxSimultaneousQueries", 4);
+    private static final Semaphore simultaneousRequests = new Semaphore(maxSimultaneousQueries);
 
     // Since most NVMe drives have a maximum read size of 128 KB, and most small reads are 512B
     // this should probably be 128*1024 / 512 = 256 to reduce queue depth and optimize tail latency
     private static final int evaluationBatchSize = 256;
 
-    // This should probably be SkipListConstants.BLOCK_SIZE / 16 in order to reduce the number of unnecessary read
-    // operations per lookup and again optimize tail latency
-    private static final int lookupBatchSize = SkipListConstants.BLOCK_SIZE / 16;
+    private static final int lookupBatchSize = SkipListConstants.MAX_RECORDS_PER_BLOCK;
 
-    private static final ExecutorService threadPool = new ThreadPoolExecutor(indexValuationThreads, Integer.MAX_VALUE, 60L, TimeUnit.SECONDS, new SynchronousQueue<>());
+    private static final ExecutorService threadPool =
+            new ThreadPoolExecutor(indexValuationThreads, 256, 60L, TimeUnit.SECONDS, new SynchronousQueue<>());
+
     private static final Logger log = LoggerFactory.getLogger(IndexQueryExecution.class);
 
     private final String nodeName;
     private final IndexResultRankingService rankingService;
 
-    private final ResultRankingContext rankingContext;
+    private final SearchContext rankingContext;
     private final List<IndexQuery> queries;
     private final IndexSearchBudget budget;
     private final ResultPriorityQueue resultHeap;
@@ -82,49 +83,71 @@ public class IndexQueryExecution {
             .help("Number of documents ranked")
             .register();
 
+    private static final Gauge index_execution_rejected_queries = Gauge.build()
+            .labelNames("node")
+            .name("index_execution_rejected_queries")
+            .help("Number of queries rejected to avoid backpressure")
+            .register();
 
+    public static class TooManySimultaneousQueriesException extends Exception {
+        @Override
+        public StackTraceElement[] getStackTrace() {
+            return new StackTraceElement[0];
+        }
+    }
 
-    public IndexQueryExecution(SearchParameters params,
-                               int serviceNode,
+    public IndexQueryExecution(CombinedIndexReader currentIndex,
                                IndexResultRankingService rankingService,
-                               CombinedIndexReader currentIndex) {
+                               SearchContext rankingContext,
+                               int serviceNode) {
         this.nodeName = Integer.toString(serviceNode);
         this.rankingService = rankingService;
+        this.rankingContext = rankingContext;
 
-        resultHeap = new ResultPriorityQueue(params.fetchSize);
+        resultHeap = new ResultPriorityQueue(rankingContext.fetchSize);
 
-        budget = params.budget;
-        limitByDomain = params.limitByDomain;
-        limitTotal = params.limitTotal;
+        budget = rankingContext.budget;
+        limitByDomain = rankingContext.limitByDomain;
+        limitTotal = rankingContext.limitTotal;
 
-        rankingContext = ResultRankingContext.create(currentIndex, params);
-        queries = currentIndex.createQueries(new SearchTerms(params.query, params.compiledQueryIds), params.queryParams, budget);
+        queries = currentIndex.createQueries(rankingContext);
 
         lookupCountdown = new CountDownLatch(queries.size());
         preparationCountdown = new CountDownLatch(indexPreparationThreads * 2);
         rankingCountdown = new CountDownLatch(indexValuationThreads * 2);
     }
 
-    public List<RpcDecoratedResultItem> run() throws InterruptedException, SQLException {
-        for (IndexQuery query : queries) {
-            threadPool.submit(() -> lookup(query));
-        }
+    public List<RpcDecoratedResultItem> run() throws InterruptedException, SQLException, TooManySimultaneousQueriesException {
 
-        for (int i = 0; i < indexPreparationThreads; i++) {
-            threadPool.submit(() -> prepare(priorityPreparationQueue, priorityEvaluationQueue));
-            threadPool.submit(() -> prepare(fullPreparationQueue, fullEvaluationQueue));
-        }
 
-        // Spawn lookup tasks for each query
-        for (int i = 0; i < indexValuationThreads; i++) {
-            threadPool.submit(() -> evaluate(priorityEvaluationQueue));
-            threadPool.submit(() -> evaluate(fullEvaluationQueue));
+        if (!simultaneousRequests.tryAcquire(budget.timeLeft() / 2, TimeUnit.MILLISECONDS)) {
+            index_execution_rejected_queries.inc();
+            throw new TooManySimultaneousQueriesException();
         }
+        try {
+            for (IndexQuery query : queries) {
+                threadPool.submit(() -> lookup(query));
+            }
 
-        // Await lookup task termination
-        lookupCountdown.await();
-        preparationCountdown.await();
-        rankingCountdown.await();
+            for (int i = 0; i < indexPreparationThreads; i++) {
+                threadPool.submit(() -> prepare(priorityPreparationQueue, priorityEvaluationQueue));
+                threadPool.submit(() -> prepare(fullPreparationQueue, fullEvaluationQueue));
+            }
+
+            // Spawn lookup tasks for each query
+            for (int i = 0; i < indexValuationThreads; i++) {
+                threadPool.submit(() -> evaluate(priorityEvaluationQueue));
+                threadPool.submit(() -> evaluate(fullEvaluationQueue));
+            }
+
+            // Await lookup task termination
+            lookupCountdown.await();
+            preparationCountdown.await();
+            rankingCountdown.await();
+        }
+        finally {
+            simultaneousRequests.release();
+        }
 
         // Deallocate any leftover ranking data buffers
         for (var data : priorityEvaluationQueue) {
@@ -134,12 +157,19 @@ public class IndexQueryExecution {
             data.close();
         }
 
+        if (printDebugSummary) {
+            for (var query : queries) {
+                query.printDebugInformation();
+            }
+        }
+
         metric_index_documents_ranked
                 .labels(nodeName)
                 .inc(1000. * resultHeap.getItemsProcessed() / budget.getLimitTime());
 
         // Final result selection
         return rankingService.selectBestResults(limitByDomain, limitTotal, rankingContext, resultHeap.toList());
+
     }
 
     private List<Future<?>> lookup(IndexQuery query) {
@@ -200,7 +230,7 @@ public class IndexQueryExecution {
                 if (docIds == null) continue;
 
                 long st = System.nanoTime();
-                var preparedData = rankingService.prepareRankingData(rankingContext, docIds, budget);
+                var preparedData = rankingService.prepareRankingData(rankingContext, docIds);
                 long et = System.nanoTime();
                 metric_index_prep_time_s
                         .labels(nodeName)
@@ -228,7 +258,7 @@ public class IndexQueryExecution {
 
                 try (rankingData) {
                     long st =  System.nanoTime();
-                    resultHeap.addAll(rankingService.rankResults(budget, rankingContext, rankingData, false));
+                    resultHeap.addAll(rankingService.rankResults(rankingContext, rankingData));
                     long et = System.nanoTime();
 
                     metric_index_rank_time_s

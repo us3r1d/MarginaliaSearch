@@ -1,7 +1,9 @@
+@import nu.marginalia.language.model.LanguageDefinition
 @import nu.marginalia.model.idx.DocumentFlags
-@import nu.marginalia.search.command.SearchParameters
+@import nu.marginalia.search.model.SearchParameters
 @import nu.marginalia.search.model.ClusteredUrlDetails
 @import nu.marginalia.search.model.UrlDetails
+
 @param ClusteredUrlDetails result
 @param SearchParameters parameters
 @param boolean domainSearch
@@ -17,7 +19,7 @@
                     <div class="flex grow justify-between items-start">
                         <div class="flex-1">
                             <h2 class="text-md sm:text-xl ${result.colorScheme.textColor} font-serif mr-4 break-words hyphens-auto">
-                                <a href="${result.first.url.toString()}" rel="noopener noreferrer">$unsafe{result.first.displayTitle()}</a>
+                                <a href="${result.first.url.toString()}" rel="noopener noreferrer" dir="auto">$unsafe{result.first.displayTitle()}</a>
                             </h2>
 
                             <div class="text-sm mt-1">
@@ -33,7 +35,7 @@
 
 
                 <div class="overflow-auto flex-1">
-                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words">
+                <p class="mt-2 text-sm text-black dark:text-white leading-relaxed break-words" dir="auto">
                     $unsafe{result.first.displayDescription()}
                 </p>
                 </div>
@@ -62,7 +64,7 @@
                             @if ("PDF".equals(item.format))
                                 <i title="PDF" class="fas fa-file-pdf text-red-500"></i>
                             @endif
-                            <a href="${item.url.toString()}" class="underline" rel="noopener noreferrer">$unsafe{item.displayTitle()}</a>
+                            <a href="${item.url.toString()}" class="underline" rel="noopener noreferrer" dir="auto">$unsafe{item.displayTitle()}</a>
                         </li>
                     @endfor
                 </ul>
@@ -94,8 +96,9 @@
                 <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Contains Cookies">Cookies</span>
             @endif
 
-            @if(result.getFirst().isTracking())
-                <span class="px-1 bg-yellow-100 text-yellow-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Uses tracking scripts">Tracking</span>
+            @if(result.getFirst().isAds())
+                <a href="/site/${result.getDomain().toString()}?view=traffic"
+                   class="px-1 cursor-hand bg-red-100 text-red-700 dark:border dark:border-yellow-600 dark:text-yellow-400 dark:bg-black rounded" title="Uses tracking scripts">Tracking</a>
             @endif
 
             @if(result.getFirst().isScripts())
@@ -103,7 +106,8 @@
             @endif
 
             @if(result.getFirst().isAds())
-                <span class="px-1 bg-red-100 text-red-700 dark:border dark:border-red-600 dark:text-red-400 dark:bg-black rounded" title="Contains adtech">Has Ads</span>
+                <a href="/site/${result.getDomain().toString()}?view=traffic"
+                   class="px-1 cursor-hand bg-red-100 text-red-700 dark:border dark:border-red-600 dark:text-red-400 dark:bg-black rounded" title="Contains adtech">Has Ads</a>
             @endif
 
             @if(result.getFirst().isAffiliate())

@@ -3,6 +3,7 @@ plugins {
 
     id "com.google.protobuf" version "0.9.4"
     id 'jvm-test-suite'
+    id "me.champeau.jmh" version "0.7.3"
 }
 
 java {
@@ -22,8 +23,7 @@ dependencies {
     implementation project(':code:common:model')
     implementation project(':code:common:config')
     implementation project(':code:common:service')
-    implementation project(':code:index:query')
-    implementation project(':code:libraries:language-processing')
+    implementation project(':code:functions:language-processing')
 
     implementation libs.bundles.slf4j
 
@@ -50,4 +50,16 @@ dependencies {
     testImplementation libs.bundles.junit
     testImplementation libs.mockito
 
+}
+
+jmh {
+    jvmArgs = [ "--enable-preview" ]
+}
+tasks.withType(me.champeau.jmh.WithJavaToolchain).configureEach {
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion.set(JavaLanguageVersion.of(rootProject.ext.jvmVersion))
+    })
+}
+tasks.withType(me.champeau.jmh.JmhBytecodeGeneratorTask).configureEach {
+    jvmArgs = ["--enable-preview"]
 }

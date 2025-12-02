@@ -9,7 +9,7 @@ import nu.marginalia.api.searchquery.model.results.debug.DebugFactor;
 import nu.marginalia.api.searchquery.model.results.debug.DebugFactorGroup;
 import nu.marginalia.api.searchquery.model.results.debug.DebugTermFactorGroup;
 import nu.marginalia.api.searchquery.model.results.debug.ResultRankingDetails;
-import nu.marginalia.index.query.limit.QueryStrategy;
+import nu.marginalia.api.searchquery.model.query.QueryStrategy;
 import nu.marginalia.model.EdgeUrl;
 
 import java.util.ArrayList;
@@ -22,12 +22,14 @@ public class QueryProtobufCodec {
     public static RpcIndexQuery convertQuery(RpcQsQuery request, ProcessedQuery query) {
         var builder = RpcIndexQuery.newBuilder();
 
-        builder.addAllDomains(request.getDomainIdsList());
+        builder.addAllRequiredDomainIds(query.specs.domains);
+        builder.addAllExcludedDomainIds(request.getExcludedDomainIdsList());
 
         builder.setQuery(IndexProtobufCodec.convertRpcQuery(query.specs.query));
 
         builder.setSearchSetIdentifier(query.specs.searchSetIdentifier);
         builder.setHumanQuery(request.getHumanQuery());
+        builder.setLangIsoCode(query.langIsoCode);
 
         builder.setNsfwFilterTierValue(request.getNsfwFilterTierValue());
 
@@ -35,6 +37,7 @@ public class QueryProtobufCodec {
         builder.setYear(IndexProtobufCodec.convertSpecLimit(query.specs.year));
         builder.setSize(IndexProtobufCodec.convertSpecLimit(query.specs.size));
         builder.setRank(IndexProtobufCodec.convertSpecLimit(query.specs.rank));
+
 
         builder.setQueryLimits(query.specs.queryLimits);
 
@@ -72,10 +75,13 @@ public class QueryProtobufCodec {
     public static RpcIndexQuery convertQuery(String humanQuery, ProcessedQuery query) {
         var builder = RpcIndexQuery.newBuilder();
 
+        builder.addAllRequiredDomainIds(query.specs.domains);
+        builder.addAllExcludedDomainIds(List.of()); // TODO: Hook in
         builder.setQuery(IndexProtobufCodec.convertRpcQuery(query.specs.query));
 
         builder.setSearchSetIdentifier(query.specs.searchSetIdentifier);
         builder.setHumanQuery(humanQuery);
+        builder.setLangIsoCode(query.langIsoCode);
 
         builder.setNsfwFilterTier(RpcIndexQuery.NSFW_FILTER_TIER.DANGER);
 
@@ -108,12 +114,13 @@ public class QueryProtobufCodec {
                 IndexProtobufCodec.convertSpecLimit(request.getYear()),
                 IndexProtobufCodec.convertSpecLimit(request.getSize()),
                 IndexProtobufCodec.convertSpecLimit(request.getRank()),
-                request.getDomainIdsList(),
+                request.getRequiredDomainIdsList(),
                 request.getQueryLimits(),
                 request.getSearchSetIdentifier(),
                 QueryStrategy.valueOf(request.getQueryStrategy()),
                 RpcTemporalBias.Bias.valueOf(request.getTemporalBias().getBias().name()),
                 NsfwFilterTier.fromCodedValue(request.getNsfwFilterTierValue()),
+                request.getLangIsoCode(),
                 request.getPagination().getPage()
         );
     }
@@ -302,7 +309,8 @@ public class QueryProtobufCodec {
     private static SearchSpecification convertSearchSpecification(RpcIndexQuery specs) {
         return new SearchSpecification(
                 IndexProtobufCodec.convertRpcQuery(specs.getQuery()),
-                specs.getDomainsList(),
+                specs.getRequiredDomainIdsList(),
+                specs.getExcludedDomainIdsList(),
                 specs.getSearchSetIdentifier(),
                 IndexProtobufCodec.convertSpecLimit(specs.getQuality()),
                 IndexProtobufCodec.convertSpecLimit(specs.getYear()),
@@ -316,7 +324,8 @@ public class QueryProtobufCodec {
 
     public static RpcQsQuery convertQueryParams(QueryParams params) {
         var builder = RpcQsQuery.newBuilder()
-                .addAllDomainIds(params.domainIds())
+                .addAllRequiredDomainIds(params.domainIds())
+                .addAllExcludedDomainIds(List.of()) // TODO: Hook in
                 .addAllTacitAdvice(params.tacitAdvice())
                 .addAllTacitExcludes(params.tacitExcludes())
                 .addAllTacitPriority(params.tacitPriority())
@@ -335,7 +344,8 @@ public class QueryProtobufCodec {
                 .setPagination(RpcQsQueryPagination.newBuilder()
                         .setPage(params.page())
                         .setPageSize(Math.min(100, params.limits().getResultsTotal()))
-                        .build());
+                        .build())
+                .setLangIsoCode(params.langIsoCode());
 
         if (params.nearDomain() != null)
             builder.setNearDomain(params.nearDomain());

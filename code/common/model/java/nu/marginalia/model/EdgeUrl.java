@@ -4,13 +4,12 @@ import nu.marginalia.util.QueryParams;
 import org.apache.commons.lang3.StringUtils;
 
 import javax.annotation.Nullable;
-import java.io.Serializable;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.Optional;
 
-public class EdgeUrl implements Serializable {
+public class EdgeUrl {
     public final String proto;
     public final EdgeDomain domain;
     public final Integer port;
@@ -51,22 +50,17 @@ public class EdgeUrl implements Serializable {
 
 
     public EdgeUrl(URI URI) {
-        try {
-            String host = URI.getHost();
+        String host = URI.getHost();
 
-            if (host == null) { // deal with a rare serialization error
-                host = "parse-error.invalid.example.com";
-            }
-
-            this.domain = new EdgeDomain(host);
-            this.path = URI.getPath().isEmpty() ? "/" : URI.getPath();
-            this.proto = URI.getScheme().toLowerCase();
-            this.port = port(URI.getPort(), proto);
-            this.param = QueryParams.queryParamsSanitizer(this.path, URI.getQuery());
-        } catch (Exception ex) {
-            System.err.println("Failed to parse " + URI);
-            throw ex;
+        if (host == null) { // deal with a rare serialization error
+            host = "parse-error.invalid.example.com";
         }
+
+        this.domain = new EdgeDomain(host);
+        this.path = StringUtils.isEmpty(URI.getPath()) ? "/" : URI.getPath();
+        this.proto = URI.getScheme().toLowerCase();
+        this.port = port(URI.getPort(), proto);
+        this.param = QueryParams.queryParamsSanitizer(this.path, URI.getQuery());
     }
 
     public EdgeUrl(URL URL) {
@@ -78,7 +72,7 @@ public class EdgeUrl implements Serializable {
             }
 
             this.domain = new EdgeDomain(host);
-            this.path = URL.getPath().isEmpty() ? "/" : URL.getPath();
+            this.path = StringUtils.isEmpty(URL.getPath()) ? "/" : URL.getPath();
             this.proto = URL.getProtocol().toLowerCase();
             this.port = port(URL.getPort(), proto);
             this.param = QueryParams.queryParamsSanitizer(this.path, URL.getQuery());
@@ -157,6 +151,10 @@ public class EdgeUrl implements Serializable {
 
     public EdgeUrl withPathAndParam(String path, String param) {
         return new EdgeUrl(proto, domain, port, path, param);
+    }
+
+    public EdgeUrl withProto(String newProto) {
+        return new EdgeUrl(newProto, domain, port, path, param);
     }
 
     public boolean equals(Object other) {
@@ -450,7 +448,16 @@ class EdgeUriFactory {
         if (colonIdx < 0 || colonIdx + 3 >= url.length()) {
             throw new URISyntaxException(url, "Lacking scheme");
         }
-        return url.indexOf('/', colonIdx + 3);
+        int endIdx = url.length();
+
+        // Catch URLs like https://example.com#/ or https://example.com?/
+
+        int fragmentPos = url.indexOf('#', colonIdx, endIdx);
+        if (fragmentPos >= 0) endIdx = fragmentPos;
+        int queryPos = url.indexOf('?', colonIdx, endIdx);
+        if (queryPos >= 0) endIdx = queryPos;
+
+        return url.indexOf('/', colonIdx + 3, endIdx);
     }
 
 

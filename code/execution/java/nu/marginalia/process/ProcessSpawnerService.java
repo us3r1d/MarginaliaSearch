@@ -5,7 +5,6 @@ import com.google.inject.Singleton;
 import nu.marginalia.WmsaHome;
 import nu.marginalia.converting.ConverterMain;
 import nu.marginalia.crawl.CrawlerMain;
-import nu.marginalia.index.IndexConstructorMain;
 import nu.marginalia.livecrawler.LiveCrawlerMain;
 import nu.marginalia.loading.LoaderMain;
 import nu.marginalia.ndp.NdpMain;
@@ -57,7 +56,7 @@ public class ProcessSpawnerService {
         LIVE_CRAWLER(LiveCrawlerMain.class),
         CONVERTER(ConverterMain.class),
         LOADER(LoaderMain.class),
-        INDEX_CONSTRUCTOR(IndexConstructorMain.class),
+        INDEX_CONSTRUCTOR("nu.marginalia.index.IndexConstructorMain"),
         NDP(NdpMain.class),
         EXPORT_TASKS(ExportTasksMain.class),
         ;
@@ -65,6 +64,9 @@ public class ProcessSpawnerService {
         public final String mainClass;
         ProcessId(Class<? extends ProcessMainClass> mainClass) {
             this.mainClass = mainClass.getName();
+        }
+        ProcessId(String mainClassFullName) {
+            this.mainClass = mainClassFullName;
         }
 
         List<String> envOpts() {
@@ -116,6 +118,17 @@ public class ProcessSpawnerService {
 
         if (System.getProperty("system.serviceNode") != null) {
             args.add("-Dsystem.serviceNode=" + System.getProperty("system.serviceNode"));
+        }
+
+        // Add SOCKS proxy properties for crawler processes
+        if (System.getProperty("crawler.socksProxy.enabled") != null) {
+            args.add("-Dcrawler.socksProxy.enabled=" + System.getProperty("crawler.socksProxy.enabled"));
+        }
+        if (System.getProperty("crawler.socksProxy.list") != null) {
+            args.add("-Dcrawler.socksProxy.list=" + System.getProperty("crawler.socksProxy.list"));
+        }
+        if (System.getProperty("crawler.socksProxy.strategy") != null) {
+            args.add("-Dcrawler.socksProxy.strategy=" + System.getProperty("crawler.socksProxy.strategy"));
         }
 
         if (Boolean.getBoolean("system.profile")) {

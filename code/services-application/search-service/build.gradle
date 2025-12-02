@@ -1,6 +1,7 @@
 plugins {
     id 'java'
     id 'application'
+    id 'com.gradleup.shadow'
     id 'jvm-test-suite'
     id 'gg.jte.gradle' version '3.1.15'
     id 'com.google.cloud.tools.jib' version '3.4.5'
@@ -32,12 +33,10 @@ dependencies {
     implementation project(':code:common:model')
     implementation project(':code:common:service')
     implementation project(':code:common:config')
-    implementation project(':code:index:query')
 
     implementation project(':code:libraries:easy-lsh')
-    implementation project(':code:libraries:language-processing')
+    implementation project(':code:functions:language-processing')
     implementation project(':code:libraries:braille-block-punch-cards')
-    implementation project(':code:libraries:term-frequency-dict')
 
     implementation project(':code:functions:live-capture:api')
     implementation project(':code:functions:math:api')
@@ -93,6 +92,11 @@ dependencies {
     testImplementation dependencies.create(libs.spark.get())
 }
 
+interface InjectedExecOps {
+    @Inject //@javax.inject.Inject
+    ExecOperations getExecOps()
+}
+
 task compileTailwind {
     def inputFile = file('tailwind/globals.css')
     def configFile = file('tailwind/tailwind.config.js')
@@ -105,7 +109,8 @@ task compileTailwind {
     outputs.file outputFile
 
     doLast {
-        exec {
+        def injected = project.objects.newInstance(InjectedExecOps)
+        injected.execOps.exec {
             // If you're getting a build error like 'npm error could not determine executable to run'
             // pointing you here, you need to run  `npm install -D tailwindcss`
             workingDir projectDir
@@ -131,4 +136,6 @@ tasks.register('paperDoll', Test) {
         includeTags "paperdoll"
     }
     jvmArgs = [ '-DrunPaperDoll=true', '--enable-preview' ]
+    classpath = sourceSets.test.runtimeClasspath
+    testClassesDirs = sourceSets.test.output.classesDirs
 }

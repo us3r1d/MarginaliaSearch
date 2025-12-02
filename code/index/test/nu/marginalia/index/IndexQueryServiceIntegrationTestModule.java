@@ -2,9 +2,9 @@ package nu.marginalia.index;
 
 import com.google.inject.AbstractModule;
 import nu.marginalia.IndexLocations;
-import nu.marginalia.index.domainrankings.DomainRankings;
 import nu.marginalia.index.journal.IndexJournal;
 import nu.marginalia.index.journal.IndexJournalSlopWriter;
+import nu.marginalia.index.searchset.DomainRankings;
 import nu.marginalia.index.searchset.SearchSetAny;
 import nu.marginalia.index.searchset.SearchSetsService;
 import nu.marginalia.linkdb.docs.DocumentDbReader;
@@ -79,7 +79,7 @@ public class IndexQueryServiceIntegrationTestModule extends AbstractModule {
 
             bind(ServiceEventLog.class).toInstance(Mockito.mock(ServiceEventLog.class));
 
-            bind(IndexJournalSlopWriter.class).toInstance(new IndexJournalSlopWriter(IndexJournal.allocateName(fastDir.resolve("iw")), 0));
+            bind(IndexJournalSlopWriter.class).toInstance(new IndexJournalSlopWriter(IndexJournal.allocateName(fastDir.resolve("iw"), "en"), 0));
 
             bind(ServiceConfiguration.class).toInstance(new ServiceConfiguration(
                     ServiceId.Index,

@@ -92,6 +92,13 @@ public class DomainTestingQueue {
     }
 
     public void fetch() {
+        try (var conn = dataSource.getConnection()) {
+            refreshQueue(conn);
+        } catch (Exception e) {
+            logger.error("Error refreshing the ndp queue");
+            throw new RuntimeException(e);
+        }
+
         while (true) {
             List<DomainToTest> domains = new ArrayList<>(2000);
             try (var conn = dataSource.getConnection();
@@ -126,6 +133,7 @@ public class DomainTestingQueue {
                 throw e; // Rethrow runtime exceptions to avoid wrapping them in another runtime exception
             }
             catch (Exception e) {
+                logger.error("Error in ndp process");
                 throw new RuntimeException("Failed to fetch domains from database", e);
             }
 
@@ -193,7 +201,8 @@ public class DomainTestingQueue {
 
         /* Insert new domains into NDP_NEW_DOMAINS table */
         try (var insertStmt = conn.prepareStatement("""
-                INSERT IGNORE INTO NDP_NEW_DOMAINS (DOMAIN_ID, PRIORITY) VALUES (?, ?)
+                INSERT INTO NDP_NEW_DOMAINS (DOMAIN_ID, PRIORITY) VALUES (?, ?)
+                ON DUPLICATE KEY UPDATE PRIORITY = VALUES(PRIORITY)
                 """)) {
             conn.setAutoCommit(false);
 
@@ -228,7 +237,10 @@ public class DomainTestingQueue {
         // This acts not only to clean up domains that we've flagged as ACCEPTED, but also to
         // repair inconsistent states where domains might have incorrectly been added to NDP_NEW_DOMAINS
         try (var stmt = conn.createStatement()) {
+            conn.setAutoCommit(false);
             stmt.executeUpdate("DELETE FROM NDP_NEW_DOMAINS WHERE DOMAIN_ID IN (SELECT ID FROM EC_DOMAIN WHERE NODE_AFFINITY>=0)");
+            stmt.executeUpdate("UPDATE NDP_NEW_DOMAINS INNER JOIN EC_DOMAIN ON EC_DOMAIN.ID=NDP_NEW_DOMAINS.DOMAIN_ID SET PRIORITY=1 WHERE DOMAIN_TOP='tumblr.com'");
+            conn.commit();
         }
         catch (Exception e) {
             throw new RuntimeException("Failed to clean up NDP_NEW_DOMAINS", e);

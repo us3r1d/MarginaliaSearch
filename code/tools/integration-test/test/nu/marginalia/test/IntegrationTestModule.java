@@ -11,10 +11,12 @@ import nu.marginalia.LanguageModels;
 import nu.marginalia.WmsaHome;
 import nu.marginalia.api.domsample.DomSampleClient;
 import nu.marginalia.db.DomainTypes;
-import nu.marginalia.index.domainrankings.DomainRankings;
 import nu.marginalia.index.journal.IndexJournalSlopWriter;
+import nu.marginalia.index.searchset.DomainRankings;
 import nu.marginalia.index.searchset.SearchSetAny;
 import nu.marginalia.index.searchset.SearchSetsService;
+import nu.marginalia.language.config.LanguageConfigLocation;
+import nu.marginalia.language.config.LanguageConfiguration;
 import nu.marginalia.linkdb.docs.DocumentDbReader;
 import nu.marginalia.linkdb.docs.DocumentDbWriter;
 import nu.marginalia.linkgraph.io.DomainLinksWriter;
@@ -122,6 +124,7 @@ public class IntegrationTestModule extends AbstractModule {
                     "TEST",
                     0,
                     UUID.randomUUID()));
+            bind(LanguageConfiguration.class).toInstance(new LanguageConfiguration(new LanguageConfigLocation.Experimental()));
 
             bind(Double.class).annotatedWith(Names.named("min-document-quality")).toInstance(-15.);
             bind(Integer.class).annotatedWith(Names.named("min-document-length")).toInstance(32);
@@ -132,11 +135,9 @@ public class IntegrationTestModule extends AbstractModule {
 
             bind(LanguageModels.class).toInstance(WmsaHome.getLanguageModels());
 
-        } catch (IOException | SQLException e) {
+        } catch (Exception e) {
             throw new RuntimeException(e);
         }
-
-
     }
 
 
