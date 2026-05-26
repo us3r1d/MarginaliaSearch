@@ -37,14 +37,10 @@ dependencies {
     implementation project(':code:functions:search-query:api')
     implementation project(':code:functions:link-graph:api')
     implementation project(':code:functions:link-graph:aggregate')
-    implementation project(':code:functions:nsfw-domain-filter')
+    implementation project(':code:functions:nsfw-filter')
 
     implementation libs.bundles.slf4j
-
-    implementation dependencies.create(libs.spark.get()) {
-        exclude group: 'org.eclipse.jetty'
-    }
-    implementation libs.bundles.jetty
+    implementation libs.bundles.jooby
     implementation libs.gson
     implementation libs.prometheus
     implementation libs.notnull
@@ -54,6 +50,7 @@ dependencies {
     }
     implementation libs.bundles.mariadb
     implementation libs.guava
+
     libs.bundles.grpc.get().each {
         implementation dependencies.create(it) {
             exclude group: 'com.google.guava'
@@ -61,7 +58,15 @@ dependencies {
     }
 
 
-
+    testImplementation platform('org.testcontainers:testcontainers-bom:1.21.4') {
+        exclude group: 'org.apache.commons'
+    }
+    testImplementation libs.commons.compress
+    testImplementation libs.commons.codec
+    testImplementation 'org.testcontainers:mariadb:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
+    testImplementation project(':code:libraries:test-helpers')
+    testImplementation libs.commons.codec
     testImplementation libs.bundles.slf4j.test
     testImplementation libs.bundles.junit
     testImplementation libs.mockito

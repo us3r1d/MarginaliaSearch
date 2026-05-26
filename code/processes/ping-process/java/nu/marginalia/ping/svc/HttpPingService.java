@@ -72,29 +72,24 @@ public class HttpPingService {
             result = new UnknownHostError();
         } else {
             // lock the domain to prevent concurrent pings
-            try (var _ = domainCoordinator.lockDomain(domainReference.asEdgeDomain())) {
-                String url = "https://" + domainReference.domainName() + "/";
-                String alternateUrl = "http://" + domainReference.domainName() + "/";
+            String url = "https://" + domainReference.domainName() + "/";
+            String alternateUrl = "http://" + domainReference.domainName() + "/";
 
-                result = pingHttpFetcher.fetchUrl(url, Method.HEAD, null, null);
+            result = pingHttpFetcher.fetchUrl(url, Method.HEAD, null, null);
 
-                if (result instanceof HttpsResponse response && shouldTryGET(response.httpStatus())) {
-                    sleep(Duration.ofSeconds(2));
-                    result = pingHttpFetcher.fetchUrl(url, Method.GET, null, null);
-                } else if (result instanceof ConnectionError) {
-                    var result2 = pingHttpFetcher.fetchUrl(alternateUrl, Method.HEAD, null, null);
-                    if (!(result2 instanceof ConnectionError)) {
-                        result = result2;
-                    }
-                    if (result instanceof HttpResponse response && shouldTryGET(response.httpStatus())) {
-                        sleep(Duration.ofSeconds(2));
-                        result = pingHttpFetcher.fetchUrl(alternateUrl, Method.GET, null, null);
-                    }
+            if (result instanceof HttpsResponse response && shouldTryGET(response.httpStatus())) {
+                Thread.sleep(Duration.ofSeconds(2));
+                result = pingHttpFetcher.fetchUrl(url, Method.GET, null, null);
+            } else if (result instanceof ConnectionError) {
+                Thread.sleep(Duration.ofSeconds(1));
+                var result2 = pingHttpFetcher.fetchUrl(alternateUrl, Method.HEAD, null, null);
+                if (!(result2 instanceof ConnectionError)) {
+                    result = result2;
                 }
-
-                // Add a grace sleep before we yield the semaphore, so that another thread doesn't
-                // immediately hammer the same domain after it's released.
-                sleep(Duration.ofSeconds(1));
+                if (result instanceof HttpResponse response && shouldTryGET(response.httpStatus())) {
+                    Thread.sleep(Duration.ofSeconds(2));
+                    result = pingHttpFetcher.fetchUrl(alternateUrl, Method.GET, null, null);
+                }
             }
         }
 
@@ -162,9 +157,7 @@ public class HttpPingService {
             case HttpsResponse httpsResponse -> {
                 var validationResult = CertificateValidator.validateCertificate(
                         (X509Certificate[]) httpsResponse.sslCertificates(),
-                        domainReference.domainName(),
-                        true
-                        );
+                        domainReference.domainName());
 
                 newPingStatus = domainAvailabilityInformationFactory.createHttpsResponse(
                         domainReference.domainId(),
@@ -217,14 +210,6 @@ public class HttpPingService {
         return statusCode < 600;
     }
 
-    private void sleep(Duration duration) {
-        try {
-            Thread.sleep(duration.toMillis());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt(); // Restore the interrupted status
-            logger.warn("Sleep interrupted", e);
-        }
-    }
 
     private void comparePingStatuses(List<WritableModel> generatedRecords,
                                      DomainAvailabilityRecord oldPingStatus,

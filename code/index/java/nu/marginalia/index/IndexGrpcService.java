@@ -4,20 +4,23 @@ import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
-import io.prometheus.client.Counter;
-import io.prometheus.client.Histogram;
+import io.prometheus.metrics.core.metrics.Counter;
+import io.prometheus.metrics.core.metrics.Histogram;
 import nu.marginalia.api.searchquery.IndexApiGrpc;
 import nu.marginalia.api.searchquery.RpcDecoratedResultItem;
 import nu.marginalia.api.searchquery.RpcIndexQuery;
-import nu.marginalia.api.searchquery.model.query.SearchSpecification;
+import nu.marginalia.api.searchquery.RpcIndexQueryResponse;
 import nu.marginalia.index.model.SearchContext;
 import nu.marginalia.index.results.IndexResultRankingService;
 import nu.marginalia.index.searchset.SearchSet;
 import nu.marginalia.index.searchset.SearchSetsService;
 import nu.marginalia.index.searchset.SmallSearchSet;
+import nu.marginalia.index.searchset.connectivity.ConnectivitySets;
+import nu.marginalia.index.searchset.connectivity.ConnectivityView;
 import nu.marginalia.language.config.LanguageConfiguration;
 import nu.marginalia.language.keywords.KeywordHasher;
 import nu.marginalia.language.model.LanguageDefinition;
+import nu.marginalia.linkdb.docs.DocumentDbReader;
 import nu.marginalia.service.module.ServiceConfiguration;
 import nu.marginalia.service.server.DiscoverableService;
 import org.slf4j.Logger;
@@ -28,6 +31,8 @@ import org.slf4j.MarkerFactory;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.LockSupport;
 
 @Singleton
 public class IndexGrpcService
@@ -42,14 +47,14 @@ public class IndexGrpcService
     // so that they can be filtered out in the production logging configuration
     private final Marker queryMarker = MarkerFactory.getMarker("QUERY");
 
-    private static final Counter wmsa_query_timeouts = Counter.build()
+    private static final Counter wmsa_query_timeouts = Counter.builder()
             .name("wmsa_index_query_timeouts")
             .help("Query timeout counter")
             .labelNames("node", "api")
             .register();
-    private static final Histogram wmsa_query_time = Histogram.build()
+    private static final Histogram wmsa_query_time = Histogram.builder()
             .name("wmsa_index_query_time")
-            .linearBuckets(0.05, 0.05, 15)
+            .classicLinearUpperBounds(0.05, 0.05, 15)
             .labelNames("node", "api")
             .help("Index-side query time")
             .register();
@@ -60,15 +65,21 @@ public class IndexGrpcService
     private final IndexResultRankingService rankingService;
     private final String nodeName;
     private final int nodeId;
+    private final DocumentDbReader documentDbReader;
+    private final ConnectivitySets connectivitySets;
 
     @Inject
     public IndexGrpcService(ServiceConfiguration serviceConfiguration,
                             LanguageConfiguration languageConfiguration,
                             StatefulIndex statefulIndex,
+                            DocumentDbReader documentDbReader,
+                            ConnectivitySets connectivitySets,
                             SearchSetsService searchSetsService,
                             IndexResultRankingService rankingService)
     {
         this.nodeId = serviceConfiguration.node();
+        this.documentDbReader = documentDbReader;
+        this.connectivitySets = connectivitySets;
         this.nodeName = Integer.toString(nodeId);
         this.statefulIndex = statefulIndex;
         this.searchSetsService = searchSetsService;
@@ -83,31 +94,40 @@ public class IndexGrpcService
     // GRPC endpoint
 
     public void query(RpcIndexQuery request,
-                      StreamObserver<RpcDecoratedResultItem> responseObserver) {
+                      StreamObserver<RpcIndexQueryResponse> responseObserver) {
 
         try {
             long endTime = System.currentTimeMillis() + request.getQueryLimits().getTimeoutMs();
             KeywordHasher hasher = findHasher(request);
 
             List<RpcDecoratedResultItem> results = wmsa_query_time
-                    .labels(nodeName, "GRPC")
+                    .labelValues(nodeName, "GRPC")
                     .time(() -> {
                         // Perform the search
-                        try {
-                            if (!statefulIndex.isLoaded()) {
-                                // Short-circuit if the index is not loaded, as we trivially know that there can be no results
+                        try (StatefulIndex.IndexReference indexReference = statefulIndex.get()) {
+                            if (!indexReference.isAvailable()) {
                                 return List.of();
                             }
 
-                            CombinedIndexReader indexReader = statefulIndex.get();
+                            final SearchSet set = getSearchSet(request);
+                            final ConnectivityView connectivityView;
 
-                            SearchContext rankingContext =
-                                    SearchContext.create(indexReader, hasher, request, getSearchSet(request));
+                            if (!set.imposesConstraint()
+                                && "en".equalsIgnoreCase(request.getLangIsoCode())
+                                && !hasSiteTerm(request)
+                            ) {
+                                connectivityView = connectivitySets.getView();
+                            }
+                            else {
+                                connectivityView = ConnectivityView.empty();
+                            }
 
-                            IndexQueryExecution queryExecution =
-                                    new IndexQueryExecution(indexReader, rankingService, rankingContext, nodeId);
+                            CombinedIndexReader index = indexReference.get();
 
+                            SearchContext rankingContext = SearchContext.create(index, hasher, request, set, connectivityView);
+                            IndexQueryExecution queryExecution = new IndexQueryExecution(index, documentDbReader, rankingService, rankingContext, nodeId);
                             return queryExecution.run();
+
                         }
                         catch (IndexQueryExecution.TooManySimultaneousQueriesException ex) {
                             logger.error("Rejected request execution due to overload");
@@ -121,14 +141,13 @@ public class IndexGrpcService
 
             if (System.currentTimeMillis() >= endTime) {
                 wmsa_query_timeouts
-                        .labels(nodeName, "GRPC")
+                        .labelValues(nodeName, "GRPC")
                         .inc();
             }
 
-            // Send the results back to the client
-            for (var result : results) {
-                responseObserver.onNext(result);
-            }
+            responseObserver.onNext(RpcIndexQueryResponse.newBuilder()
+                            .addAllResults(results)
+                            .build());
 
             responseObserver.onCompleted();
         }
@@ -136,6 +155,14 @@ public class IndexGrpcService
             logger.error("Error in handling request", ex);
             responseObserver.onError(Status.INTERNAL.withCause(ex).asRuntimeException());
         }
+    }
+
+    private boolean hasSiteTerm(RpcIndexQuery request) {
+        for (var term : request.getTerms().getTermsRequireList()) {
+            if (term.startsWith("site:"))
+                return true;
+        }
+        return false;
     }
 
     /** Keywords are translated to a numeric format via a 64 bit hash algorithm,
@@ -155,33 +182,24 @@ public class IndexGrpcService
 
 
     // exists for test access
-    public List<RpcDecoratedResultItem> justQuery(SearchSpecification specsSet) {
-        try {
-            if (!statefulIndex.isLoaded()) {
-                // Short-circuit if the index is not loaded, as we trivially know that there can be no results
+    public List<RpcDecoratedResultItem> justQuery(RpcIndexQuery request) {
+        try (var indexReference = statefulIndex.get()) {
+            if (!indexReference.isAvailable())
                 return List.of();
-            }
 
-            CombinedIndexReader currentIndex = statefulIndex.get();
+            CombinedIndexReader currentIndex = indexReference.get();
 
             SearchContext context = SearchContext.create(currentIndex,
-                    keywordHasherByLangIso.get("en"), specsSet, getSearchSet(specsSet));
+                    keywordHasherByLangIso.get("en"), request, getSearchSet(request),
+                    ConnectivityView.empty()
+                    );
 
-            return new IndexQueryExecution(currentIndex, rankingService, context, 1).run();
+            return new IndexQueryExecution(currentIndex, documentDbReader, rankingService, context, 1).run();
         }
         catch (Exception ex) {
             logger.error("Error in handling request", ex);
             return List.of();
         }
-    }
-
-    private SearchSet getSearchSet(SearchSpecification specsSet) {
-
-        if (specsSet.domains != null && !specsSet.domains.isEmpty()) {
-            return new SmallSearchSet(specsSet.domains);
-        }
-
-        return searchSetsService.getSearchSetByName(specsSet.searchSetIdentifier);
     }
 
     private SearchSet getSearchSet(RpcIndexQuery request) {
@@ -190,7 +208,8 @@ public class IndexGrpcService
             return new SmallSearchSet(request.getRequiredDomainIdsList());
         }
 
-        return searchSetsService.getSearchSetByName(request.getSearchSetIdentifier());
+        String identifier = request.getSearchSetIdentifier();
+        return searchSetsService.getSearchSetByName(identifier);
     }
 
 

@@ -2,11 +2,8 @@ package nu.marginalia;
 
 import com.google.inject.Guice;
 import com.google.inject.Inject;
-import nu.marginalia.api.searchquery.QueryProtobufCodec;
-import nu.marginalia.api.searchquery.RpcQsQuery;
-import nu.marginalia.api.searchquery.RpcQueryLimits;
-import nu.marginalia.api.searchquery.RpcResultRankingParameters;
-import nu.marginalia.api.searchquery.model.results.PrototypeRankingParameters;
+import nu.marginalia.api.searchquery.*;
+import nu.marginalia.api.searchquery.model.CompiledSearchFilterSpec;
 import nu.marginalia.converting.processor.DomainProcessor;
 import nu.marginalia.converting.writer.ConverterBatchWriter;
 import nu.marginalia.crawl.fetcher.ContentTags;
@@ -25,6 +22,7 @@ import nu.marginalia.index.reverse.construction.full.FullIndexConstructor;
 import nu.marginalia.index.reverse.construction.prio.PrioIndexConstructor;
 import nu.marginalia.index.searchset.DomainRankings;
 import nu.marginalia.index.searchset.SearchSetAny;
+import nu.marginalia.index.searchset.connectivity.ConnectivityView;
 import nu.marginalia.io.SerializableCrawlDataStream;
 import nu.marginalia.language.config.LanguageConfiguration;
 import nu.marginalia.language.keywords.KeywordHasher;
@@ -40,8 +38,8 @@ import nu.marginalia.loading.links.DomainLinksLoaderService;
 import nu.marginalia.model.EdgeDomain;
 import nu.marginalia.model.EdgeUrl;
 import nu.marginalia.model.id.UrlIdCodec;
-import nu.marginalia.parquet.crawldata.CrawledDocumentParquetRecordFileWriter;
 import nu.marginalia.process.control.FakeProcessHeartbeat;
+import nu.marginalia.slop.SlopCrawlDataRecord;
 import nu.marginalia.storage.FileStorageService;
 import nu.marginalia.test.IntegrationTestModule;
 import nu.marginalia.test.TestUtil;
@@ -62,6 +60,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 public class IntegrationTest {
+    static {
+        System.setProperty("index.disableViabilityPrecheck", "true");
+    }
+
     IntegrationTestModule testModule;
     @Inject
     DomainProcessor domainProcessor;
@@ -87,7 +89,7 @@ public class IntegrationTest {
     LanguageConfiguration languageConfiguration;
 
     Path warcData = null;
-    Path crawlDataParquet = null;
+    Path crawlDataSlop = null;
     Path processedDataDir = null;
 
     @Inject
@@ -108,14 +110,14 @@ public class IntegrationTest {
         Guice.createInjector(testModule).injectMembers(this);
 
         warcData = Files.createTempFile("warc", ".warc.gz");
-        crawlDataParquet = Files.createTempFile("crawl", ".parquet");
+        crawlDataSlop = Files.createTempFile("crawl", ".slop.zip");
         processedDataDir = Files.createTempDirectory("processed");
     }
 
     @AfterEach
     public void tearDownTest() throws IOException {
         Files.deleteIfExists(warcData);
-        Files.deleteIfExists(crawlDataParquet);
+        Files.deleteIfExists(crawlDataSlop);
         TestUtil.clearTempDir(processedDataDir);
 
         testModule.cleanUp();
@@ -172,16 +174,16 @@ public class IntegrationTest {
         }
 
         /** CONVERT WARC */
-        CrawledDocumentParquetRecordFileWriter.convertWarc(
+        SlopCrawlDataRecord.convertWarc(
                 "www.example.com",
                 new UserAgent("search.marginalia.nu",
                         "search.marginalia.nu"),
                 warcData,
-                crawlDataParquet);
+                crawlDataSlop);
 
         /** PROCESS CRAWL DATA */
 
-        var processedDomain = domainProcessor.fullProcessing(SerializableCrawlDataStream.openDataStream(crawlDataParquet));
+        var processedDomain = domainProcessor.fullProcessing(SerializableCrawlDataStream.openDataStream(crawlDataSlop));
 
         System.out.println(processedDomain);
 
@@ -229,55 +231,44 @@ public class IntegrationTest {
 
         /** QUERY */
 
-        {
+        try (var indexReference = statefulIndex.get()) {
             var request = RpcQsQuery.newBuilder()
                     .setQueryLimits(RpcQueryLimits.newBuilder()
                             .setTimeoutMs(1000)
                             .setResultsTotal(100)
                             .setResultsByDomain(10)
-                            .setFetchSize(1000)
                             .build())
                     .setLangIsoCode("en")
-                    .setQueryStrategy("AUTO")
                     .setHumanQuery("\"is that there is\"")
                     .build();
 
-            var params = QueryProtobufCodec.convertRequest(request);
-            var p = RpcResultRankingParameters.newBuilder(PrototypeRankingParameters.sensibleDefaults()).setExportDebugData(true).build();
-            var query = queryFactory.createQuery(params, p);
+            var query = queryFactory.createQuery(request, CompiledSearchFilterSpec.builder("test", "test").build(), null);
+            System.out.println(query);
 
-            var indexRequest = QueryProtobufCodec.convertQuery(request, query);
-
-            System.out.println(indexRequest);
-
-            var rs = new IndexQueryExecution(statefulIndex.get(), rankingService, SearchContext.create(statefulIndex.get(), new KeywordHasher.AsciiIsh(), indexRequest, new SearchSetAny()), 1).run();
+            var rs = new IndexQueryExecution(indexReference.get(), documentDbReader, rankingService,
+                    SearchContext.create(indexReference.get(), new KeywordHasher.AsciiIsh(), query.indexQuery, new SearchSetAny(), ConnectivityView.empty()), 1).run();
 
             System.out.println(rs);
             Assertions.assertEquals(1, rs.size());
         }
 
-        {
+        try (var indexReference = statefulIndex.get()) {
             var request = RpcQsQuery.newBuilder()
                     .setQueryLimits(RpcQueryLimits.newBuilder()
                             .setTimeoutMs(1000)
                             .setResultsTotal(100)
                             .setResultsByDomain(10)
-                            .setFetchSize(1000)
                             .build())
                     .setLangIsoCode("sv")
-                    .setQueryStrategy("AUTO")
                     .setHumanQuery("härigenom förordnas")
                     .build();
 
-            var params = QueryProtobufCodec.convertRequest(request);
-            var p = RpcResultRankingParameters.newBuilder(PrototypeRankingParameters.sensibleDefaults()).setExportDebugData(true).build();
-            var query = queryFactory.createQuery(params, p);
+            var query = queryFactory.createQuery(request, CompiledSearchFilterSpec.builder("test", "test").build(), null);
 
-            var indexRequest = QueryProtobufCodec.convertQuery(request, query);
+            System.out.println(query);
 
-            System.out.println(indexRequest);
-
-            var rs = new IndexQueryExecution(statefulIndex.get(), rankingService, SearchContext.create(statefulIndex.get(), new KeywordHasher.AsciiIsh(), indexRequest, new SearchSetAny()), 1).run();
+            var rs = new IndexQueryExecution(indexReference.get(), documentDbReader, rankingService,
+                    SearchContext.create(indexReference.get(), new KeywordHasher.AsciiIsh(), query.indexQuery, new SearchSetAny(), ConnectivityView.empty()), 1).run();
 
             System.out.println(rs);
             Assertions.assertEquals(1, rs.size());
@@ -317,18 +308,18 @@ public class IntegrationTest {
         }
 
         /** CONVERT WARC */
-        CrawledDocumentParquetRecordFileWriter.convertWarc(
+        SlopCrawlDataRecord.convertWarc(
                 "www.example.com",
                 new UserAgent("search.marginalia.nu",
                         "search.marginalia.nu"),
                 warcData,
-                crawlDataParquet);
+                crawlDataSlop);
 
         /** PROCESS CRAWL DATA */
 
-        var processedDomain = domainProcessor.fullProcessing(SerializableCrawlDataStream.openDataStream(crawlDataParquet));
+        var processedDomain = domainProcessor.fullProcessing(SerializableCrawlDataStream.openDataStream(crawlDataSlop));
 
-        System.out.println(processedDomain);
+//        System.out.println(processedDomain);
 
         /** WRITE PROCESSED DATA */
 
@@ -373,28 +364,22 @@ public class IntegrationTest {
 
         /** QUERY */
 
-        {
+        try (var indexReference = statefulIndex.get()) {
             var request = RpcQsQuery.newBuilder()
                     .setQueryLimits(RpcQueryLimits.newBuilder()
-                            .setTimeoutMs(10000000)
+                            .setTimeoutMs(10_000_000)
                             .setResultsTotal(100)
                             .setResultsByDomain(10)
-                            .setFetchSize(1000)
                             .build())
                     .setLangIsoCode("en")
-                    .setQueryStrategy("AUTO")
                     .setHumanQuery("when was captain james cook born")
                     .build();
 
-            var params = QueryProtobufCodec.convertRequest(request);
-            var p = RpcResultRankingParameters.newBuilder(PrototypeRankingParameters.sensibleDefaults()).setExportDebugData(true).build();
-            var query = queryFactory.createQuery(params, p);
+            var query = queryFactory.createQuery(request, CompiledSearchFilterSpec.builder("test", "test").build(), null);
 
-            var indexRequest = QueryProtobufCodec.convertQuery(request, query);
+//            System.out.println(query);
 
-            System.out.println(indexRequest);
-
-            var rs = new IndexQueryExecution(statefulIndex.get(), rankingService, SearchContext.create(statefulIndex.get(), new KeywordHasher.AsciiIsh(), indexRequest, new SearchSetAny()), 1).run();
+            var rs = new IndexQueryExecution(indexReference.get(), documentDbReader, rankingService, SearchContext.create(indexReference.get(), new KeywordHasher.AsciiIsh(), query.indexQuery, new SearchSetAny(), ConnectivityView.empty()), 1).run();
 
             System.out.println(rs);
 
@@ -429,7 +414,7 @@ public class IntegrationTest {
                     this::addRankToIdEncoding,
                     tmpDir);
 
-            constructor.createReverseIndex(new FakeProcessHeartbeat(), "createReverseIndexFull", IndexJournal.findJournal(workDir, lang).orElseThrow(), workDir);
+            constructor.createReverseIndex(new FakeProcessHeartbeat(), "createReverseIndexFull", IndexJournal.findJournal(workDir, lang).orElseThrow());
         }
     }
 

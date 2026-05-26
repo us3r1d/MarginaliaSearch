@@ -1,51 +1,124 @@
 package nu.marginalia.index;
 
-import com.google.common.collect.MinMaxPriorityQueue;
-import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
-import nu.marginalia.api.searchquery.model.results.SearchResultItem;
+import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
+import nu.marginalia.index.model.RankableDocument;
+import nu.marginalia.model.id.UrlIdCodec;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.*;
 
-/** A priority queue for search results. This class is not thread-safe,
- * in general, except for concurrent use of the addAll method.
- * <p></p>
- * Since the expected use case is to add a large number of items
- * and then iterate over the items, the class is optimized for
- * this scenario, and does not implement other mutating methods
- * than addAll().
+/** A priority queue for search results. This class is not thread-safe.
  */
-public class ResultPriorityQueue implements Iterable<SearchResultItem> {
-    private final LongOpenHashSet idsInSet = new LongOpenHashSet();
-    private final MinMaxPriorityQueue<SearchResultItem> queue;
+public class ResultPriorityQueue implements Iterable<RankableDocument> {
+    private final TreeSet<RankableDocument> queue;
+
+    /** The number of results seen from each domain (including rejects) */
+    private final Int2IntOpenHashMap resultsPerDomainSeen;
+
+    /** The number of results currently held from each domain */
+    private final Int2IntOpenHashMap resultsPerDomainHeld;
 
     private int itemsProcessed = 0;
+    private final int limit;
+    private final int domainLimit;
 
-    public ResultPriorityQueue(int limit) {
-        this.queue = MinMaxPriorityQueue.<SearchResultItem>orderedBy(Comparator.naturalOrder()).maximumSize(limit).create();
+    public ResultPriorityQueue(int limit, int domainLimit) {
+        this.queue = new TreeSet<>(Comparator.naturalOrder());
+
+        this.resultsPerDomainHeld = new Int2IntOpenHashMap(limit);
+        this.resultsPerDomainHeld.defaultReturnValue(0);
+
+        this.resultsPerDomainSeen = new Int2IntOpenHashMap(2_500);
+        this.resultsPerDomainSeen.defaultReturnValue(0);
+
+        this.limit = limit;
+        this.domainLimit = domainLimit;
     }
 
-    public @NotNull Iterator<SearchResultItem> iterator() {
+    public @NotNull Iterator<RankableDocument> iterator() {
         return queue.iterator();
     }
 
-    /** Adds all items to the queue, and returns true if any items were added.
-     * This is a thread-safe operation.
-     */
-    public synchronized boolean addAll(@NotNull Collection<? extends SearchResultItem> items) {
-        itemsProcessed+=items.size();
+    public void addAll(ResultPriorityQueue otherQueue) {
+        for (var doc : otherQueue) {
+            // Add with no statistics
+            add(doc, false);
+        }
 
-        for (var item : items) {
-            if (idsInSet.add(item.getDocumentId())) {
-                queue.add(item);
+        // Merge the statistics
+        otherQueue.resultsPerDomainSeen.int2IntEntrySet().fastForEach(entry -> {
+            resultsPerDomainSeen.addTo(entry.getIntKey(), entry.getIntValue());
+        });
+        itemsProcessed += otherQueue.itemsProcessed;
+    }
+
+    public boolean add(@NotNull RankableDocument document) {
+        return add(document, true);
+    }
+
+    private boolean add(@NotNull RankableDocument document, boolean updateStats) {
+        if (document.item == null)
+            return false;
+
+        int domainId = UrlIdCodec.getDomainId(document.combinedDocumentId);
+
+        if (updateStats) {
+            resultsPerDomainSeen.addTo(domainId, 1);
+            itemsProcessed++;
+        }
+
+        // Short circuit if we're already at the limit and this item is worse than the last one
+        if (queue.size() >= limit) {
+            var last = queue.last();
+            if (last.item.compareTo(document.item) <= 0) {
+                return false;
             }
         }
+
+        queue.add(document);
+
+        resultsPerDomainHeld.addTo(domainId, 1);
+
+        pruneDomain(domainId);
+        removeExcessItems();
 
         return true;
     }
 
-    public synchronized List<SearchResultItem> toList() {
-        return new ArrayList<>(queue);
+
+    private void removeExcessItems() {
+
+        while (queue.size() > limit) {
+            var item = queue.pollLast();
+
+            if (1 == resultsPerDomainHeld.addTo(item.domainId(), -1)) {
+                resultsPerDomainHeld.remove(item.domainId());
+            }
+        }
+
+    }
+
+    private void pruneDomain(int domainId) {
+        int heldCount = resultsPerDomainHeld.get(domainId);
+
+        if (heldCount < domainLimit) {
+            return;
+        }
+
+        for (var iter = queue.reversed().iterator(); iter.hasNext() && heldCount > domainLimit; ) {
+            var item = iter.next();
+
+            if (item.domainId() != domainId)
+                continue;
+
+            iter.remove();
+            resultsPerDomainHeld.addTo(domainId, -1);
+            heldCount--;
+        }
+    }
+
+    public int numResultsFromDomain(int domainId) {
+        return resultsPerDomainSeen.get(domainId);
     }
 
     public int size() {

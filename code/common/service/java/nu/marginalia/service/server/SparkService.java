@@ -1,6 +1,6 @@
 package nu.marginalia.service.server;
 
-import io.prometheus.client.Counter;
+import io.prometheus.metrics.core.metrics.Counter;
 import nu.marginalia.mq.inbox.MqInboxIf;
 import nu.marginalia.service.client.ServiceNotAvailableException;
 import nu.marginalia.service.discovery.property.ServiceKey;
@@ -14,6 +14,9 @@ import spark.Request;
 import spark.Response;
 import spark.Spark;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 public class SparkService {
@@ -24,16 +27,16 @@ public class SparkService {
 
     private final Initialization initialization;
 
-    private final static Counter request_counter = Counter.build("wmsa_request_counter", "Request Counter")
+    private final static Counter request_counter = Counter.builder().name("wmsa_request_counter").help("Request Counter")
             .labelNames("service", "node")
             .register();
-    private final static Counter request_counter_good = Counter.build("wmsa_request_counter_good", "Good Requests")
+    private final static Counter request_counter_good = Counter.builder().name("wmsa_request_counter_good").help("Good Requests")
             .labelNames("service", "node")
             .register();
-    private final static Counter request_counter_bad = Counter.build("wmsa_request_counter_bad", "Bad Requests")
+    private final static Counter request_counter_bad = Counter.builder().name("wmsa_request_counter_bad").help("Bad Requests")
             .labelNames("service", "node")
             .register();
-    private final static Counter request_counter_err = Counter.build("wmsa_request_counter_err", "Error Requests")
+    private final static Counter request_counter_err = Counter.builder().name("wmsa_request_counter_err").help("Error Requests")
             .labelNames("service", "node")
             .register();
     private final String serviceName;
@@ -45,7 +48,6 @@ public class SparkService {
 
     public SparkService(BaseServiceParams params,
                         Runnable configureStaticFiles,
-                        ServicePartition partition,
                         List<DiscoverableService> grpcServices) throws Exception {
 
         this.initialization = params.initialization;
@@ -83,7 +85,7 @@ public class SparkService {
             else {
                 logger.error("Uncaught exception", e);
             }
-            request_counter_err.labels(serviceName, Integer.toString(node)).inc();
+            request_counter_err.labelValues(serviceName, Integer.toString(node)).inc();
         });
 
         if (!initialization.isReady() && ! initialized ) {
@@ -98,6 +100,18 @@ public class SparkService {
                     params.configuration.bindAddress(),
                     restEndpoint.port(),
                     params.configuration.externalAddress());
+
+            // docker-specific kludge to allow the rest endpoint to be discovered from the health check,
+            // which is otherwise not possible since we have to bind to a specific internal interface on
+            // ipvlan configurations to avoid public access to the internal APIs.
+            if (Files.isDirectory(Path.of("/app"))) {
+                try {
+                    String uriBase = "http://" + restEndpoint.host() + ":" + restEndpoint.port();
+                    Files.writeString(Path.of("/tmp/rest-addr"), uriBase);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
 
             configureStaticFiles.run();
 
@@ -121,24 +135,21 @@ public class SparkService {
                         """;
             });
 
-            grpcServer = new GrpcServer(config, serviceRegistry, partition, grpcServices);
+            grpcServer = new GrpcServer(config, serviceRegistry, grpcServices);
             grpcServer.start();
         }
     }
 
     public SparkService(BaseServiceParams params,
-                        ServicePartition partition,
                         List<DiscoverableService> grpcServices) throws Exception {
         this(params,
                 SparkService::defaultSparkConfig,
-                partition,
                 grpcServices);
     }
 
     public SparkService(BaseServiceParams params) throws Exception {
         this(params,
                 SparkService::defaultSparkConfig,
-                ServicePartition.any(),
                 List.of());
     }
 
@@ -175,15 +186,15 @@ public class SparkService {
     }
 
     private void auditRequestIn(Request request, Response response) {
-        request_counter.labels(serviceName, Integer.toString(node)).inc();
+        request_counter.labelValues(serviceName, Integer.toString(node)).inc();
     }
 
     private void auditRequestOut(Request request, Response response) {
         if (response.status() < 400) {
-            request_counter_good.labels(serviceName, Integer.toString(node)).inc();
+            request_counter_good.labelValues(serviceName, Integer.toString(node)).inc();
         }
         else {
-            request_counter_bad.labels(serviceName, Integer.toString(node)).inc();
+            request_counter_bad.labelValues(serviceName, Integer.toString(node)).inc();
         }
 
         logResponse(request, response);

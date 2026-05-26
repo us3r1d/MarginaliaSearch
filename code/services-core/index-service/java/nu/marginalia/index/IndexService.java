@@ -1,25 +1,30 @@
 package nu.marginalia.index;
 
 import com.google.inject.Inject;
+import io.jooby.Cookie;
+import io.jooby.Jooby;
+import io.jooby.SessionStore;
 import nu.marginalia.IndexLocations;
+import nu.marginalia.domsample.DomSampleGrpcService;
 import nu.marginalia.execution.*;
 import nu.marginalia.functions.favicon.FaviconGrpcService;
 import nu.marginalia.index.api.IndexMqEndpoints;
 import nu.marginalia.linkdb.docs.DocumentDbReader;
 import nu.marginalia.linkgraph.DomainLinks;
 import nu.marginalia.linkgraph.PartitionLinkGraphService;
+import nu.marginalia.livecapture.LiveCaptureGrpcService;
+import nu.marginalia.rss.svc.FeedsGrpcService;
 import nu.marginalia.service.control.ServiceEventLog;
 import nu.marginalia.service.discovery.property.ServicePartition;
 import nu.marginalia.service.server.BaseServiceParams;
 import nu.marginalia.service.server.Initialization;
-import nu.marginalia.service.server.SparkService;
+import nu.marginalia.service.server.JoobyService;
 import nu.marginalia.service.server.mq.MqRequest;
 import nu.marginalia.storage.FileStorageService;
 import nu.marginalia.svc.ExecutorFileTransferService;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import spark.Spark;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,7 +33,7 @@ import java.util.List;
 import static nu.marginalia.linkdb.LinkdbFileNames.DOCDB_FILE_NAME;
 import static nu.marginalia.linkdb.LinkdbFileNames.DOMAIN_LINKS_FILE_NAME;
 
-public class IndexService extends SparkService {
+public class IndexService extends JoobyService {
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
     @NotNull
@@ -39,6 +44,7 @@ public class IndexService extends SparkService {
     private final DocumentDbReader documentDbReader;
 
     private final DomainLinks domainLinks;
+    private final ExecutorFileTransferService fileTransferService;
     private final ServiceEventLog eventLog;
 
     private final ExecutionInit executionInit;
@@ -56,6 +62,9 @@ public class IndexService extends SparkService {
                         ExecutorCrawlGrpcService executorCrawlGrpcService,
                         ExecutorSideloadGrpcService executorSideloadGrpcService,
                         ExecutorExportGrpcService executorExportGrpcService,
+                        LiveCaptureGrpcService liveCaptureGrpcService,
+                        DomSampleGrpcService domSampleGrpcService,
+                        FeedsGrpcService feedsGrpcService,
                         FaviconGrpcService faviconGrpcService,
                         ExecutionInit executionInit,
                         ExecutorFileTransferService fileTransferService,
@@ -63,14 +72,17 @@ public class IndexService extends SparkService {
             throws Exception
     {
         super(params,
-                ServicePartition.partition(params.configuration.node()),
                 List.of(indexQueryService,
                         partitionLinkGraphService,
+                        liveCaptureGrpcService,
+                        domSampleGrpcService,
+                        feedsGrpcService,
                         executorGrpcService,
                         executorCrawlGrpcService,
                         executorSideloadGrpcService,
                         executorExportGrpcService,
-                        faviconGrpcService)
+                        faviconGrpcService),
+                List.of()
         );
 
         this.opsService = opsService;
@@ -79,14 +91,23 @@ public class IndexService extends SparkService {
         this.documentDbReader = documentDbReader;
         this.domainLinks = domainLinks;
         this.executionInit = executionInit;
+        this.fileTransferService = fileTransferService;
         this.eventLog = eventLog;
 
         this.init = params.initialization;
 
-        Spark.get("/transfer/file/:fid", fileTransferService::transferFile);
-        Spark.head("/transfer/file/:fid", fileTransferService::transferFile);
-
         Thread.ofPlatform().name("initialize-index").start(this::initialize);
+    }
+
+    @Override
+    public void startJooby(Jooby jooby) {
+        super.startJooby(jooby);
+
+        jooby.setSessionStore(SessionStore.memory(Cookie.session("marginalia-session")));
+
+        jooby.get("/transfer/file/{fid}", fileTransferService::transferFile);
+        jooby.head("/transfer/file/{fid}", fileTransferService::transferFile);
+
     }
 
     volatile boolean initialized = false;
@@ -114,8 +135,16 @@ public class IndexService extends SparkService {
         return "ok";
     }
 
-    @MqRequest(endpoint = IndexMqEndpoints.SWITCH_LINKDB)
-    public void switchLinkdb(String unusedArg) throws Exception {
+    @MqRequest(endpoint = IndexMqEndpoints.SWITCH_INDEX)
+    public String switchIndex(String message) throws Exception {
+        if (!opsService.switchIndex(() -> switchLinkdb())) {
+            throw new IllegalStateException("Ops lock busy or index switch failed");
+        }
+
+        return "ok";
+    }
+
+    public void switchLinkdb() throws Exception {
         logger.info("Switching link databases");
 
         Path newPathDocs = IndexLocations
@@ -137,19 +166,25 @@ public class IndexService extends SparkService {
         }
     }
 
-    @MqRequest(endpoint = IndexMqEndpoints.SWITCH_INDEX)
-    public String switchIndex(String message) throws Exception {
-        if (!opsService.switchIndex()) {
-            throw new IllegalStateException("Ops lock busy");
-        }
-
-        return "ok";
-    }
 
     @MqRequest(endpoint = IndexMqEndpoints.INDEX_IS_BLOCKED)
     public String isBlocked(String message) throws Exception {
         return Boolean.valueOf(opsService.isBusy()).toString();
     }
+
+    @Override
+    // binds to /internal/ready, used for healthchecks
+    public boolean isReady() {
+        if (!statefulIndex.isLoaded()) {
+            return false;
+        }
+
+        if (statefulIndex.isDegraded())
+            return false;
+
+        return true;
+    }
+
 
     public void initialize() {
         if (!initialized) {

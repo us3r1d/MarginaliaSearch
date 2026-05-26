@@ -17,7 +17,8 @@
 					<ul class="dropdown-menu">
 						<li><a class="dropdown-item" href="/api-keys" title="Create or remove API keys">API Keys</a></li>
 						<li><a class="dropdown-item" href="/complaints" title="View and act on user complaints">Complaints</a></li>
-						<li><a class="dropdown-item" href="/review-random-domains" title="Review random domains list">Random Exploration</a></li>
+						<li><a class="dropdown-item" href="/random-domains/review" title="Review the random domains list">Random Exploration Review</a></li>
+						<li><a class="dropdown-item" href="/random-domains/suggestions" title="Review user-submitted random domain suggestions">Random Exploration Suggestions</a></li>
 					</ul>
 				</li>
                 {{/unless}}
@@ -46,6 +47,7 @@
 					<ul class="dropdown-menu">
                         <li><a class="dropdown-item" href="/datasets" title="View and update the data sets">Data Sets</a></li>
                         <li><a class="dropdown-item" href="/domain-ranking-sets" title="View and update domain rankings ">Domain Ranking Sets</a></li>
+                        <li><a class="dropdown-item" href="/schedules" title="Configure actor run schedules">Schedules</a></li>
                         <li><hr class="dropdown-divider"></li>
                         <li><a class="dropdown-item" href="/aborted-processes" title="View and restart aborted processes">Aborted Processes</a></li>
                         <li><a class="dropdown-item" href="/actions" title="System actions">Actions</a></li>

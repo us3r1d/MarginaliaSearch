@@ -34,15 +34,21 @@ public class DocumentSpan {
         int pos = -1;
 
         int cnt = 0;
-        while (pi < positions.size() && sei < startsEnds.size()) {
+        for (;;) {
             if (pos < start) {
+                if (pi >= positions.size())
+                    break;
                 pos = positions.getInt(pi++);
             }
             else if (pos < end) {
                 cnt++;
+                if (pi >= positions.size())
+                    break;
                 pos = positions.getInt(pi++);
             }
             else {
+                if (sei >= startsEnds.size()) break;
+
                 start = startsEnds.getInt(sei++);
                 end = startsEnds.getInt(sei++);
             }
@@ -72,7 +78,7 @@ public class DocumentSpan {
     }
 
     /** Returns true if for any position in the list, there exists a range
-     * (position[i], position[i]+len] that is overlapped by a span */
+     * [position[i], position[i]+len) that is fully contained by a span */
     public boolean containsRange(IntList positions, int len) {
         if (null == startsEnds || startsEnds.size() < 2 || positions.isEmpty()) {
             return false;
@@ -104,9 +110,9 @@ public class DocumentSpan {
         return false;
     }
 
-    /** Returns true if for any position in the list, there exists a range
-     * (position[i], position[i]+len] that is overlapped by a span */
-    public int containsRangeExact(IntList positions, int len) {
+    /** Returns the number of instances there exists a range
+     * [position[i], position[i]+len) that is an exact match for a span */
+    public int countRangeMatchesExact(IntList positions, int len) {
         if (null == startsEnds || startsEnds.size() < 2 || positions.isEmpty()) {
             return 0;
         }
@@ -123,7 +129,6 @@ public class DocumentSpan {
             if (position == start && position + len == end) {
                 cnt++;
                 if (sei + 2 <= startsEnds.size()) {
-                    pi = 0;
                     start = startsEnds.getInt(sei++);
                     end = startsEnds.getInt(sei++);
                 }
@@ -170,9 +175,43 @@ public class DocumentSpan {
                 end = startsEnds.getInt(sei++);
             }
             else {
-                return ret;
+                break;
             }
 
+        }
+
+        return ret;
+    }
+
+    public int countRangeMatchesAtBoundary(IntList positions, int len) {
+        if (null == startsEnds || startsEnds.size() < 2 || positions.isEmpty()) {
+            return 0;
+        }
+
+        int sei = 0;
+        int ret = 0;
+
+        int start = startsEnds.getInt(sei++);
+        int end = startsEnds.getInt(sei++);
+
+        for (int pi = 0; pi < positions.size();) {
+            int position = positions.getInt(pi);
+            if (position >= start && position + len <= end) {
+                if (position == start || position + len == end) {
+                    ret++;
+                }
+                pi++;
+            }
+            else if (position < end) {
+                pi++;
+            }
+            else if (sei + 2 <= startsEnds.size()) {
+                start = startsEnds.getInt(sei++);
+                end = startsEnds.getInt(sei++);
+            }
+            else {
+                break;
+            }
         }
 
         return ret;
@@ -237,7 +276,7 @@ public class DocumentSpan {
             if (value >= 0) {
                 return true;
             }
-            else if (current >= 0 && current < end) {
+            else if (current >= 0 && current + 1 < end) {
                 value = ++current;
                 return true;
             }

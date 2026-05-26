@@ -2,6 +2,7 @@
 @import java.util.List
 
 @param String title
+@param String sst
 @param String domainName
 @param List<SimilarDomain> list
 
@@ -10,8 +11,6 @@
     <div class="bg-white dark:bg-gray-800 shadow-sm rounded overflow-hidden border border-gray-300 dark:border-gray-600">
         <div class="px-4 py-2 bg-margeblue text-white border-b border-gray-200 dark:border-gray-600 flex place-items-baseline">
             <h2 class="text-md">${title}</h2>
-            <div class="grow"></div>
-            <button class="hide-filter-button fas fa-close"></button>
         </div>
 
         <div class="overflow-x-auto overflow-hidden">
@@ -29,7 +28,7 @@
                     <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
                         <td class="px-3 py-6 md:py-3 whitespace-nowrap">
                             @if(item.linkType().isLinked())
-                                <a href="/crosstalk?domains=${domainName},${item.url().getDomain().toString()}"
+                                <a href="/crosstalk?domains=${domainName},${item.url().getDomain().toString()}&sst=${sst}"
                                    class="text-liteblue dark:text-blue-200 ${item.linkType().faIcon()}"
                                    title="${item.linkType().getDescription()}">
                                 </a>
@@ -50,7 +49,7 @@
                                 <i class="fas fa-link mr-1"></i>
                             @endif
 
-                            <a href="/site/${item.url().getDomain().toString()}?view=similar"
+                            <a href="/site/${item.url().getDomain().toString()}?view=similar&sst=${sst}"
                                rel="external noopener nofollow"
                                class="text-liteblue dark:text-blue-200 dark:text-blue-200">
                                 ${item.url().getDomain().toString()}

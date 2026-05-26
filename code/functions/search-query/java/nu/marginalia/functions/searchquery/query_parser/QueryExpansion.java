@@ -4,7 +4,9 @@ import ca.rmen.porterstemmer.PorterStemmer;
 import com.google.inject.Inject;
 import nu.marginalia.functions.searchquery.query_parser.model.QWord;
 import nu.marginalia.functions.searchquery.query_parser.model.QWordGraph;
+import nu.marginalia.functions.searchquery.query_parser.model.QWordGraphPathLister;
 import nu.marginalia.functions.searchquery.query_parser.model.QWordPathsRenderer;
+import nu.marginalia.language.NounVariants;
 import nu.marginalia.segmentation.NgramLexicon;
 import nu.marginalia.term_frequency_dict.TermFrequencyDict;
 import org.apache.commons.lang3.StringUtils;
@@ -19,44 +21,56 @@ import java.util.stream.Collectors;
 public class QueryExpansion {
     private static final PorterStemmer ps = new PorterStemmer();
     private final TermFrequencyDict dict;
+    private final NounVariants nounVariants;
     private final NgramLexicon lexicon;
-
-    private final List<ExpansionStrategy> expansionStrategies = List.of(
-            this::joinDashes,
-            this::splitWordNum,
-            this::joinTerms,
-            this::categoryKeywords,
-            this::ngramAll
-    );
 
     @Inject
     public QueryExpansion(TermFrequencyDict dict,
+                          NounVariants nounVariants,
                           NgramLexicon lexicon
                           ) {
         this.dict = dict;
+        this.nounVariants = nounVariants;
         this.lexicon = lexicon;
     }
 
-    public Expansion expandQuery(List<String> words) {
+    public Expansion expandQuery(String langIsoCode, List<String> words) {
 
         QWordGraph graph = new QWordGraph(words);
 
-        for (var strategy : expansionStrategies) {
+        for (var strategy : getStrategies(langIsoCode)) {
             strategy.expand(graph);
         }
 
-        List<List<String>> optionalPhraseConstraints = createSegments(graph);
+        return new Expansion(QWordPathsRenderer.render(graph),
+                createSegments(graph),
+                listFullConstraints(graph));
+    }
 
-        // also create a segmentation that is just the entire query
-        List<String> fullPhraseConstraint = new ArrayList<> ();
-        for (var qw : graph) {
-            fullPhraseConstraint.add(qw.word());
+    public List<ExpansionStrategy> getStrategies(String langIsoCode) {
+        if ("en".equalsIgnoreCase(langIsoCode)) {
+            return List.of(
+                    this::joinDashes,
+                    this::splitWordNum,
+                    this::joinTerms,
+                    this::nounPluralFormsEN,
+                    this::categoryKeywords,
+                    this::joinerVariants,
+                    this::ngramAll
+            );
+        }
+        else {
+            return List.of(
+                    this::joinDashes,
+                    this::splitWordNum,
+                    this::joinTerms,
+                    this::categoryKeywords,
+                    this::ngramAll
+            );
         }
 
-        var compiled = QWordPathsRenderer.render(graph);
-
-        return new Expansion(compiled, optionalPhraseConstraints, fullPhraseConstraint);
     }
+
 
     private static final Pattern dashPattern = Pattern.compile("-");
     private static final Pattern numWordBoundary = Pattern.compile("[0-9][a-zA-Z]|[a-zA-Z][0-9]");
@@ -99,6 +113,27 @@ public class QueryExpansion {
         }
     }
 
+    public void joinerVariants(QWordGraph graph) {
+
+        for (var qw : graph) {
+            // Only consider terms not appearing at the ends of the graph
+
+            if (graph.getNextOriginal(qw).getFirst().isEnd()) {
+                continue;
+            }
+            if (graph.getPrevOriginal(qw).getFirst().isBeg()) {
+                continue;
+            }
+
+            switch (qw.word()) {
+                case "vs" -> {
+                    graph.addLink(graph.getPrevOriginal(qw).getFirst(),
+                            graph.getNextOriginal(qw).getFirst());
+                    graph.addVariant(qw, "and");
+                }
+            }
+        }
+    }
     // Category keyword substitution, e.g. guitar wiki -> guitar generator:wiki
     public void categoryKeywords(QWordGraph graph) {
 
@@ -141,6 +176,19 @@ public class QueryExpansion {
             }
 
             prev = qw;
+        }
+    }
+
+    /** Attempt to rewrite the last word in a different pluralization */
+    private void nounPluralFormsEN(QWordGraph graph) {
+        List<QWord> parts = new ArrayList<>();
+
+        for (var part : new ArrayList<>(graph.getPrev(QWord.end()))) {
+            String word = part.word();
+
+            for (String variant : nounVariants.pluralVariant(word)) {
+                graph.addVariant(part, variant);
+            }
         }
     }
 
@@ -194,9 +242,51 @@ public class QueryExpansion {
         return new ArrayList<>(constraints);
     }
 
+    /** Enumerate full phrase constraints from all paths through the graph.
+     */
+    private static List<List<String>> listFullConstraints(QWordGraph graph) {
+        var paths = QWordGraphPathLister.listPaths(graph);
+        var reachability = graph.reachability();
+
+        Set<List<String>> result = new LinkedHashSet<>();
+
+        outer:
+        for (var path : paths) {
+            List<String> words = path.stream()
+                    .sorted(reachability.topologicalComparator())
+                    .map(QWord::word)
+                    .toList();
+
+            if (words.size() < 2)
+                continue;
+
+            // Exclude paths that contain ngrams, as these will never be meaningful for position matching
+            // since they lack position data
+            for (String word : words) {
+                if (word.contains("_"))
+                    continue outer;
+            }
+
+            result.add(words);
+        }
+
+        // If no paths were found, add a constraint that matches the entire query
+        if (result.isEmpty()) {
+            List<String> fullPhraseConstraint = new ArrayList<> ();
+            for (var qw : graph) {
+                fullPhraseConstraint.add(qw.word());
+            }
+            result.add(fullPhraseConstraint);
+        }
+
+        return new ArrayList<>(result);
+    }
+
     public interface ExpansionStrategy {
         void expand(QWordGraph graph);
     }
 
-    public record Expansion(String compiledQuery, List<List<String>> optionalPharseConstraints, List<String> fullPhraseConstraint) {}
+    public record Expansion(String compiledQuery,
+                            List<List<String>> optionalPharseConstraints,
+                            List<List<String>> fullPhraseConstraints) {}
 }

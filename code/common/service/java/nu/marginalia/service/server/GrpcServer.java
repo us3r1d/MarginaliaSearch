@@ -9,6 +9,8 @@ import nu.marginalia.service.discovery.property.ServiceKey;
 import nu.marginalia.service.discovery.property.ServicePartition;
 import nu.marginalia.service.module.ServiceConfiguration;
 import nu.marginalia.util.NamedExecutorFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -18,15 +20,15 @@ import java.util.concurrent.Executors;
 
 public class GrpcServer {
     private final Server server;
-
+    private static final Logger logger = LoggerFactory.getLogger(GrpcServer.class);
     private static final boolean useLoom = Boolean.getBoolean("system.experimentalUseLoom");
 
     public GrpcServer(ServiceConfiguration config,
                       ServiceRegistryIf serviceRegistry,
-                      ServicePartition partition,
                       List<DiscoverableService> grpcServices) throws Exception {
 
-        int port = serviceRegistry.requestPort(config.externalAddress(), new ServiceKey.Grpc<>("-", partition));
+        int port = serviceRegistry.requestPort(config.externalAddress(),
+                new ServiceKey.Grpc<>("-", ServicePartition.multi()));
 
         int nThreads = Math.clamp(Runtime.getRuntime().availableProcessors() / 2, 2, 16);
 
@@ -45,16 +47,23 @@ public class GrpcServer {
         for (var grpcService : grpcServices) {
 
             if (!grpcService.shouldRegisterService()) {
+                logger.info("Omitting {}", grpcService.getClass().getSimpleName());
                 continue;
+            }
+            else {
+                logger.info("Registering {}", grpcService.getClass().getSimpleName());
             }
 
             var svc = grpcService.bindService();
 
-            serviceRegistry.registerService(
-                    ServiceKey.forServiceDescriptor(svc.getServiceDescriptor(), partition),
-                    config.instanceUuid(),
-                    config.externalAddress()
-            );
+            // Register both on the node-id and wildcard partitions to allow both means of communication
+            for (var partition : List.of(ServicePartition.any(), ServicePartition.partition(config.node()))) {
+                serviceRegistry.registerService(
+                        ServiceKey.forServiceDescriptor(svc.getServiceDescriptor(), partition),
+                        config.instanceUuid(),
+                        config.externalAddress()
+                );
+            }
 
             grpcServerBuilder.addService(svc);
         }

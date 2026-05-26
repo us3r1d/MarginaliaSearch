@@ -1,20 +1,23 @@
 package nu.marginalia.service.server;
 
 import io.jooby.*;
-import io.prometheus.client.Counter;
+import io.jooby.jte.JteModule;
+import io.jooby.netty.NettyServer;
+import io.prometheus.metrics.core.metrics.Counter;
 import nu.marginalia.mq.inbox.MqInboxIf;
 import nu.marginalia.service.client.ServiceNotAvailableException;
 import nu.marginalia.service.discovery.property.ServiceEndpoint;
 import nu.marginalia.service.discovery.property.ServiceKey;
 import nu.marginalia.service.discovery.property.ServicePartition;
 import nu.marginalia.service.module.ServiceConfiguration;
-import nu.marginalia.service.server.jte.JteModule;
 import nu.marginalia.service.server.mq.ServiceMqSubscription;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.Marker;
 import org.slf4j.MarkerFactory;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -28,16 +31,16 @@ public class JoobyService {
 
     private final Initialization initialization;
 
-    private final static Counter request_counter = Counter.build("wmsa_request_counter", "Request Counter")
+    private final static Counter request_counter = Counter.builder().name("wmsa_request_counter").help("Request Counter")
             .labelNames("service", "node")
             .register();
-    private final static Counter request_counter_good = Counter.build("wmsa_request_counter_good", "Good Requests")
+    private final static Counter request_counter_good = Counter.builder().name("wmsa_request_counter_good").help("Good Requests")
             .labelNames("service", "node")
             .register();
-    private final static Counter request_counter_bad = Counter.build("wmsa_request_counter_bad", "Bad Requests")
+    private final static Counter request_counter_bad = Counter.builder().name("wmsa_request_counter_bad").help("Bad Requests")
             .labelNames("service", "node")
             .register();
-    private final static Counter request_counter_err = Counter.build("wmsa_request_counter_err", "Error Requests")
+    private final static Counter request_counter_err = Counter.builder().name("wmsa_request_counter_err").help("Error Requests")
             .labelNames("service", "node")
             .register();
     private final String serviceName;
@@ -48,13 +51,12 @@ public class JoobyService {
     private GrpcServer grpcServer;
 
     private ServiceConfiguration config;
-    private final List<MvcExtension> joobyServices;
+    private final List<Extension> joobyServices;
     private final ServiceEndpoint restEndpoint;
 
     public JoobyService(BaseServiceParams params,
-                        ServicePartition partition,
                         List<DiscoverableService> grpcServices,
-                        List<MvcExtension> joobyServices
+                        List<Extension> joobyServices
     ) throws Exception {
 
         this.joobyServices = joobyServices;
@@ -89,14 +91,48 @@ public class JoobyService {
             else {
                 logger.error("Uncaught exception", e);
             }
-            request_counter_err.labels(serviceName, Integer.toString(node)).inc();
+            request_counter_err.labelValues(serviceName, Integer.toString(node)).inc();
         });
 
         if (!initialization.isReady() && ! initialized ) {
             initialized = true;
-            grpcServer = new GrpcServer(config, serviceRegistry, partition, grpcServices);
+            grpcServer = new GrpcServer(config, serviceRegistry, grpcServices);
             grpcServer.start();
         }
+    }
+
+    /** Build the HTTP server with options derived from the service configuration
+     * for Jooby to use.
+     */
+    public Server createServer() {
+        var options = new ServerOptions();
+        options.setHost(config.bindAddress());
+        options.setPort(restEndpoint.port());
+
+        // docker-specific kludge to allow the rest endpoint to be discovered from the health check,
+        // which is otherwise not possible since we have to bind to a specific internal interface on
+        // ipvlan configurations to avoid public access to the internal APIs.
+        if (Files.isDirectory(Path.of("/app"))) {
+            try {
+                String uriBase = "http://" + restEndpoint.host() + ":" + restEndpoint.port();
+                Files.writeString(Path.of("/tmp/rest-addr"), uriBase);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        // Enable gzip compression of response data, but set compression to the lowest level
+        // since it doesn't really save much more space to dial it up.  It's typically a
+        // single digit percentage difference since HTML already compresses very well with level = 1.
+        options.setCompressionLevel(1);
+
+        // Set a cap on the number of worker and I/O threads, as Jooby's default value does not seem to consider
+        // multi-tenant servers with high thread counts, and spins up an exorbitant number of threads in that
+        // scenario
+        options.setWorkerThreads(Math.min(16, options.getWorkerThreads()));
+        options.setIoThreads(Math.min(16, options.getIoThreads()));
+
+        return new NettyServer(options);
     }
 
     public void startJooby(Jooby jooby) {
@@ -107,27 +143,12 @@ public class JoobyService {
                 config.externalAddress());
 
         // FIXME:  This won't work outside of docker, may need to submit a PR to jooby to allow classpaths here
-        if (Files.exists(Path.of("/app/resources/jte")) || Files.exists(Path.of("/app/classes/jte-precompiled"))) {
-            jooby.install(new JteModule(Path.of("/app/resources/jte"), Path.of("/app/classes/jte-precompiled")));
+        if (Files.exists(Path.of("/app/resources/jte")) || Files.exists(Path.of("/app/classes"))) {
+            jooby.install(new JteModule(Path.of("/app/resources/jte"), Path.of("/app/classes")));
         }
         if (Files.exists(Path.of("/app/resources/static"))) {
             jooby.assets("/*", Paths.get("/app/resources/static"));
         }
-        var options = new ServerOptions();
-        options.setHost(config.bindAddress());
-        options.setPort(restEndpoint.port());
-
-        // Enable gzip compression of response data, but set compression to the lowest level
-        // since it doesn't really save much more space to dial it up.  It's typically a
-        // single digit percentage difference since HTML already compresses very well with level = 1.
-        options.setCompressionLevel(1);
-
-        // Set a cap on the number of worker threads, as Jooby's default value does not seem to consider
-        // multi-tenant servers with high thread counts, and spins up an exorbitant number of threads in that
-        // scenario
-        options.setWorkerThreads(Math.min(16, options.getWorkerThreads()));
-
-        jooby.setServerOptions(options);
 
         jooby.get("/internal/ping", ctx -> "pong");
         jooby.get("/internal/started", this::isInitialized);
@@ -166,20 +187,20 @@ public class JoobyService {
     }
 
     private void auditRequestIn(Context ctx) {
-        request_counter.labels(serviceName, Integer.toString(node)).inc();
+        request_counter.labelValues(serviceName, Integer.toString(node)).inc();
     }
 
     private void auditRequestOut(Context ctx, Object result, Throwable failure) {
         if (ctx.getResponseCode().value() < 400) {
-            request_counter_good.labels(serviceName, Integer.toString(node)).inc();
+            request_counter_good.labelValues(serviceName, Integer.toString(node)).inc();
         }
         else {
-            request_counter_bad.labels(serviceName, Integer.toString(node)).inc();
+            request_counter_bad.labelValues(serviceName, Integer.toString(node)).inc();
         }
 
         if (failure != null) {
             logger.error("Request failed " + ctx.getMethod() + " " + ctx.getRequestURL(), failure);
-            request_counter_err.labels(serviceName, Integer.toString(node)).inc();
+            request_counter_err.labelValues(serviceName, Integer.toString(node)).inc();
         }
     }
 

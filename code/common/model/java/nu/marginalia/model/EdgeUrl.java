@@ -1,5 +1,6 @@
 package nu.marginalia.model;
 
+import crawlercommons.filters.basic.BasicURLNormalizer;
 import nu.marginalia.util.QueryParams;
 import org.apache.commons.lang3.StringUtils;
 
@@ -165,8 +166,7 @@ public class EdgeUrl {
                     && Objects.equals(e.path, path)
                     && Objects.equals(e.param, param);
         }
-
-        return true;
+        return false;
     }
 
     public boolean equalsExactly(Object other) {
@@ -180,7 +180,7 @@ public class EdgeUrl {
                     && Objects.equals(e.param, param);
         }
 
-        return true;
+        return false;
     }
 
     public int hashCode() {
@@ -196,11 +196,8 @@ public class EdgeUrl {
     }
 
     public URI asURI() throws URISyntaxException {
-        if (port != null) {
-            return new URI(this.proto, null, this.domain.toString(), this.port, this.path, this.param, null);
-        }
-
-        return new URI(this.proto, this.domain.toString(), this.path, this.param, null);
+        // Perform URLencoding and so on if necessary
+        return URI.create(toString());
     }
 
     public EdgeDomain getDomain() {
@@ -214,6 +211,8 @@ public class EdgeUrl {
 }
 
 class EdgeUriFactory {
+
+    private static BasicURLNormalizer normalizer = new BasicURLNormalizer();
     public static URI parseURILenient(String url) throws URISyntaxException {
 
         if (shouldOmitUrlencodeRepair(url)) {
@@ -231,6 +230,7 @@ class EdgeUriFactory {
         if (pathIdx < 0) { // url looks like http://marginalia.nu
             return new URI(url + "/");
         }
+
         s.append(url, 0, pathIdx);
 
         // We don't want the fragment, and multiple fragments breaks the Java URIParser for some reason
@@ -244,7 +244,12 @@ class EdgeUriFactory {
         if (queryIdx < end) {
             urlencodeQuery(s, url.substring(queryIdx + 1, end));
         }
-        return new URI(s.toString());
+
+        String normalizedUrl = normalizer.filter(s.toString());
+        if (normalizedUrl == null) {
+            throw new URISyntaxException(s.toString(), "URI normalization failed");
+        }
+        return new URI(normalizedUrl);
     }
 
     /** Break apart the path element of an URI into its components, and then
@@ -411,7 +416,7 @@ class EdgeUriFactory {
             char c = url.charAt(idx++);
             if (c == '?') break;
             if (c == '/') continue;
-            if (c == '#') return true;
+            if (c == '#') return false;
             if (!isUrlSafe(c)) return false;
         }
 
@@ -422,7 +427,7 @@ class EdgeUriFactory {
             char c = url.charAt(idx++);
             if (c == '&') continue;
             if (c == '=') continue;
-            if (c == '#') return true;
+            if (c == '#') return false;
             if (!isUrlSafe(c)) return false;
         }
 
@@ -431,7 +436,7 @@ class EdgeUriFactory {
 
 
     private static boolean isAsciiAlphabetic(int c) {
-        return (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
     }
 
     private static boolean isHexDigit(int c) {

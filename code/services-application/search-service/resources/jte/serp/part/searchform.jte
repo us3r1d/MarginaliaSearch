@@ -2,11 +2,19 @@
 
 @param String query
 @param String profile
+@param String scrapeStopToken
 @param String languageIsoCode
 @param SearchFilters filters
 
+@param int page
+@param String requestMethod
+@param String displayUrl
 
-<form class="flex-1 max-w-2xl" action="/search">
+!{boolean isCustom = "custom".equalsIgnoreCase(filters.getCurrentFilter());}
+<form id="search-form" class="flex-1 max-w-2xl" action="/search" method="${isCustom ? "post" : "get"}">
+@if (isCustom)
+<textarea class="hidden" id="filter-spec" name="filterSpec"></textarea>
+@endif
     <div class="flex">
         @if (query != null && query.isBlank())
         <%-- Add autofocus if the query is blank --%>
@@ -37,12 +45,29 @@
 
     </div>
 
-    @if (filters.showRecentOption.isSet()) <input type="hidden" name="js" value="${filters.removeJsOption.value()}"> @endif
+    @if (scrapeStopToken != null) <input type="hidden" name="sst" value="${scrapeStopToken}"> @endif
+    @if (filters.removeJsOption.isSet()) <input type="hidden" name="js" value="${filters.removeJsOption.value()}"> @endif
     @if (filters.reduceAdtechOption.isSet()) <input type="hidden" name="adtech" value="${filters.reduceAdtechOption.value()}"> @endif
     @if (filters.searchTitleOption.isSet()) <input type="hidden" name="searchTitle" value="${filters.searchTitleOption.value()}"> @endif
     @if (filters.showRecentOption.isSet()) <input type="hidden" name="recent" value="${filters.showRecentOption.value()}"> @endif
+    @if (filters.searchNsfwOption.isSet()) <input type="hidden" name="nsfw" value="${filters.searchNsfwOption.value()}"> @endif
     @if (languageIsoCode != null && !"en".equalsIgnoreCase(languageIsoCode)) <input type="hidden" name="lang" value="${languageIsoCode}"> @endif
-
+    @if (isCustom && "GET".equalsIgnoreCase(requestMethod))
+        <input type="hidden" name="page" value="${page}">
+    @endif
     <input type="hidden" name="profile" value="${profile}">
 
 </form>
+@if (isCustom)
+<script lang="javascript">
+    document.getElementById('filter-spec').textContent = localStorage.getItem('custom-filter');
+
+    // we also add this as an event handler to catch config changes that have happened since page load
+    document.getElementById('search-form').addEventListener('submit', evt => {
+        document.getElementById('filter-spec').textContent = localStorage.getItem('custom-filter');
+        return true;
+    });
+
+    window.history.replaceState(null, window.title, "${displayUrl}")
+</script>
+@endif

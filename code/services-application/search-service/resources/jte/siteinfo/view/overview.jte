@@ -1,17 +1,26 @@
+@import nu.marginalia.browse.RandomDomainSuggestionsDao.DomainStatus
+@import nu.marginalia.browse.RandomDomainSuggestionsDao.SubmitOutcome
 @import nu.marginalia.db.DbDomainQueries
 @import nu.marginalia.search.svc.SearchSiteInfoService
 @import nu.marginalia.search.svc.SearchSiteInfoService.*
 @import nu.marginalia.search.model.UrlDetails
+@import java.time.Instant
+@import java.time.ZoneId
+@import java.time.ZonedDateTime
+@import java.time.format.DateTimeFormatter
+@import java.time.temporal.ChronoUnit
+@import java.util.Objects
 
 @param SiteInfoWithContext siteInfo
 
 <!-- Main content -->
 
+
 <div class="flex-1 p-4 space-y-4 mx-auto w-full md:w-auto">
     <div class="flex border border-gray-300  dark:border-gray-600 rounded bg-white dark:bg-gray-800 flex-col space-y-4 pb-4 overflow-hidden md:max-w-lg" >
         <div class="flex place-items-center space-x-2 p-2 text-md border-b dark:border-gray-600 bg-margeblue text-white">
             <img src="/site/${siteInfo.domain()}/favicon" style="width: 16px; height: 16px; vertical-align: center">
-            <span>${siteInfo.domain()}</span>
+            <h2>${siteInfo.domain()}</h2>
             <div class="grow">
             </div>
             <a href="https://web.archive.org/web/*/${siteInfo.domain()}"
@@ -28,10 +37,49 @@
             </a>
         @endif
 
+        @if (siteInfo.suggestionFlash() == SubmitOutcome.SUBMITTED)
+            <div class="mx-3 p-2 text-sm bg-green-100 dark:bg-green-900 dark:text-green-100 rounded">
+                Thanks! This domain has been queued for review.
+            </div>
+        @elseif (siteInfo.suggestionFlash() == SubmitOutcome.DUPLICATE)
+            <div class="mx-3 p-2 text-sm bg-gray-100 dark:bg-gray-700 dark:text-gray-100 rounded">
+                This domain is already awaiting review.
+            </div>
+        @elseif (siteInfo.suggestionFlash() == SubmitOutcome.INELIGIBLE)
+            <div class="mx-3 p-2 text-sm bg-yellow-100 dark:bg-yellow-900 dark:text-yellow-100 rounded">
+                This domain is not eligible for the random exploration set.
+            </div>
+        @endif
+
+        @if (siteInfo.randomStatus() == DomainStatus.LISTED)
+            <div class="mx-3 flex place-items-center space-x-2 p-2 text-sm bg-gray-100 dark:bg-gray-700 dark:text-gray-100 rounded">
+                <i class="fas fa-dice text-margeblue dark:text-blue-200"></i>
+                <span>Featured in <a class="underline text-liteblue dark:text-blue-200" href="/explore">random exploration</a>.</span>
+            </div>
+        @elseif (siteInfo.randomStatus() == DomainStatus.PENDING_REVIEW)
+            <div class="mx-3 flex place-items-center space-x-2 p-2 text-sm bg-gray-100 dark:bg-gray-700 dark:text-gray-100 rounded">
+                <i class="fa-regular fa-hourglass-half text-margeblue dark:text-blue-200"></i>
+                <span>Suggested for random exploration. Awaiting review.</span>
+            </div>
+        @elseif (siteInfo.randomStatus() == DomainStatus.ELIGIBLE)
+            <form method="POST" action="/site/${siteInfo.domain()}/suggest-random"
+                  class="mx-3 p-3 flex items-center space-x-3 bg-gray-50 dark:bg-gray-700 border dark:border-gray-600 rounded">
+                <i class="fas fa-dice text-margeblue dark:text-blue-200"></i>
+                <div class="grow text-sm text-gray-700 dark:text-gray-200">
+                    Recommend this domain for random exploration?
+                </div>
+                <button type="submit"
+                        class="text-sm font-medium text-white bg-margeblue rounded-md py-1.5 px-3 shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:margeblue"
+                        title="Submit this domain for operator review">
+                    Suggest
+                </button>
+            </form>
+        @endif
+
         @if (siteInfo.hasFeed())
             <div class="mx-3 flex place-items-baseline space-x-2 p-2 bg-gray-100 dark:bg-gray-600 rounded">
                 <i class="fas fa-rss text-orange-500"></i>
-                <span class="grow">Feed</span>
+                <h2 class="grow">Feed</h2>
 
                 <form method="post" action="/site/${siteInfo.domain()}/subscribe">
                 @if (siteInfo.isSubscribed())
@@ -66,7 +114,7 @@
 
             <div class="mx-3 flex place-items-baseline space-x-2 p-2 bg-gray-100 dark:bg-gray-600 rounded">
                 <i class="fas fa-magnifying-glass"></i>
-                <span>Sample</span>
+                <h2>Sample</h2>
             </div>
 
             <dl class="mx-3 text-gray-800 dark:text-white">
@@ -80,10 +128,10 @@
 
         @endif
 
-        @if (siteInfo.domainInformation().isUnknownDomain())
+        @if (siteInfo.domainInformation().getUnknownDomain())
             <div class="mx-3 flex place-items-baseline space-x-2 p-2 bg-gray-100 dark:bg-gray-600 rounded">
                 <i class="fa-regular fa-circle-question"></i>
-                <span>Unknown Domain</span>
+                <h2>Unknown Domain</h2>
             </div>
 
             <div class="mx-5 flex flex-col space-y-2">
@@ -97,10 +145,10 @@
 
         @endif
 
-        @if (siteInfo.domainInformation().isBlacklisted())
+        @if (siteInfo.domainInformation().getBlacklisted())
             <div class="mx-3 flex place-items-baseline space-x-2 p-2 bg-gray-100 dark:bg-gray-600 rounded">
                 <i class="fas fa-ban"></i>
-                <span>Blacklisted</span>
+                <h2>Blacklisted</h2>
             </div>
             <div class="mx-5 flex flex-col space-y-2">
                 <p>This website is <em>blacklisted</em>. This excludes it from crawling and indexing.</p>
@@ -109,7 +157,7 @@
                     either annoying search engine spam, or tasteless content bad faith content.</p>
 
                 <p>Sometimes this is in error.  Blacklisting can be appealed using
-                    the <a class="underline text-liteblue dark:text-blue-200" href="?view=report">Report Form</a>.
+                    the <a class="underline text-liteblue dark:text-blue-200" href="?view=report&sst=${siteInfo.sst()}">Report Form</a>.
                 </p>
                 <p>In the interest of transparency, the full list of blacklisted domains is periodically
                     published at
@@ -118,7 +166,7 @@
             </div>
         @endif
 
-        @if (siteInfo.domainInformation().isSuggestForCrawling() && siteInfo.domainInformation().getNodeAffinity() < 0)
+        @if (siteInfo.domainInformation().getSuggestForCrawling() && siteInfo.domainInformation().getNodeAffinity() < 0)
             <form method="POST"
                   action="/site/suggest/">
                 <div class="max-w-md mx-auto p-6 bg-white shadow border dark:border-gray-600 border-gray-200  mx-1 flex space-y-4 flex-col">
@@ -151,7 +199,7 @@
         @if (!siteInfo.siblingDomains().isEmpty())
             <div class="mx-3 flex place-items-baseline space-x-2 p-2 bg-gray-100 dark:bg-gray-600 rounded">
                 <i class="fas fa-globe"></i>
-                <span>Related Subdomains</span>
+                <h2>Related Subdomains</h2>
             </div>
 
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-600 mx-4">
@@ -164,7 +212,7 @@
                 @for (DbDomainQueries.DomainWithNode sibling : siteInfo.siblingDomains())
                     <tr>
                         <td class="px-3 py-6 md:py-3 whitespace-nowrap">
-                            <a class="text-liteblue dark:text-blue-200" href="/site/${sibling.domain().toString()}">${sibling.domain().toString()}</a>
+                            <a class="text-liteblue dark:text-blue-200 underline" href="/site/${sibling.domain().toString()}?sst=${siteInfo.sst()}">${sibling.domain().toString()}</a>
 
                             @if (!sibling.isIndexed())
                                 <i class="ml-1 fa-regular fa-question-circle text-gray-400 dark:text-gray-600 text-xs" title="Not indexed"></i>
@@ -180,7 +228,7 @@
         @if (siteInfo.isKnown())
             <div class="mx-3 flex place-items-baseline space-x-2 p-2 bg-gray-100 dark:bg-gray-600 rounded">
                 <i class="fas fa-chart-simple"></i>
-                <span>Crawl Statistics</span>
+                <h2>Crawl Statistics</h2>
             </div>
 
             <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mx-6 sm:mx-8">
@@ -217,37 +265,19 @@
             </div>
             @endif
 
-
-            <div class="mx-3 flex place-items-baseline space-x-2 p-2 bg-gray-100 dark:bg-gray-600 rounded">
-                <i class="fas fa-network-wired"></i>
-                <span>Network Details</span>
-            </div>
-
-            <div class="grid grid-cols-2 grid-cols-2 gap-2 mx-6 sm:mx-8">
-                <div>
-                    <h3 class="text-sm font-medium text-gray-500 dark:text-gray-300">IP Address</h3>
-                    <p class="text-lg font-mono">${siteInfo.domainInformation().getIp()}</p>
-                    <p class="text-sm text-gray-600 dark:text-gray-400">${siteInfo.domainInformation().getIpCountry()} ${siteInfo.domainInformation().getIpFlag()}</p>
-                </div>
-                <div title="Autonomous system">
-                    <h3 class="text-sm font-medium text-gray-500 dark:text-gray-300">ASN Details</h3>
-                    <p class="text-lg font-mono">AS${siteInfo.domainInformation().getAsn()} - ${siteInfo.domainInformation().getAsnOrg()}</p>
-                    <p class="text-sm text-gray-600 dark:text-gray-400 ">${siteInfo.domainInformation().getAsnCountry()} ${siteInfo.domainInformation().getAsnFlag()}</p>
-                </div>
-            </div>
         @endif
     </div>
 </div>
 
 @if (!siteInfo.similar().isEmpty() || !siteInfo.linking().isEmpty())
     <div class="mx-auto md:py-4 px-4 flex-1 space-y-4 content md:block w-full md:w-auto hidden sm:block">
-        @template.siteinfo.part.linkedDomains("Similar Domains", siteInfo.domain(), siteInfo.similar())
-        @template.siteinfo.part.linkedDomains("Linked Domains", siteInfo.domain(), siteInfo.linking())
+        @template.siteinfo.part.linkedDomains(title = "Similar Domains", sst = siteInfo.sst(), domainName = siteInfo.domain(), list = siteInfo.similar())
+        @template.siteinfo.part.linkedDomains(title = "Linked Domains", sst = siteInfo.sst(), domainName = siteInfo.domain(), list = siteInfo.linking())
     </div>
     <aside id="mobile-menu" class="fixed inset-0 z-50 flex justify-center bg-white/90 dark:bg-black/90 backdrop-blur-sm hidden p-2 h-screen overflow-scroll">
         <div class="w-full">
-        @template.siteinfo.part.linkedDomains("Similar Domains", siteInfo.domain(), siteInfo.similar())
-        @template.siteinfo.part.linkedDomains("Linked Domains", siteInfo.domain(), siteInfo.linking())
+        @template.siteinfo.part.linkedDomains(title = "Similar Domains", sst = siteInfo.sst(), domainName = siteInfo.domain(), list = siteInfo.similar())
+        @template.siteinfo.part.linkedDomains(title = "Linked Domains", sst = siteInfo.sst(), domainName = siteInfo.domain(), list = siteInfo.linking())
         </div>
     </aside>
     <button class="fixed bottom-10 right-5 sm:hidden text-sm bg-margeblue text-white p-4 rounded-xl active:text-slate-200" id="filter-button">

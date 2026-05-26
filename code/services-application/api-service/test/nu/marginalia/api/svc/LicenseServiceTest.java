@@ -2,13 +2,15 @@ package nu.marginalia.api.svc;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import nu.marginalia.api.polar.PolarBenefits;
+import nu.marginalia.api.polar.PolarClient;
 import nu.marginalia.test.TestMigrationLoader;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.MariaDBContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import spark.HaltException;
 
+import java.io.IOException;
 import java.sql.SQLException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -57,7 +59,7 @@ class LicenseServiceTest {
             stmt.executeBatch();
         }
 
-        service = new LicenseService(dataSource);
+        service = new LicenseService(dataSource, PolarClient.asDisabled(), PolarBenefits.asDisabled());
     }
 
     @AfterAll
@@ -66,24 +68,24 @@ class LicenseServiceTest {
     }
 
     @Test
-    void testLicense() {
+    void testLicense() throws LicenseService.NoSuchKeyException, IOException {
         var publicLicense = service.getLicense("public");
         var limitedLicense = service.getLicense("limited");
 
-        assertEquals(publicLicense.rate, 0);
-        assertEquals(publicLicense.key, "public");
-        assertEquals(publicLicense.license, "Public Domain");
-        assertEquals(publicLicense.name, "John Q. Public");
+        assertEquals(publicLicense.ratePerMinute(), 0);
+        assertEquals(publicLicense.key(), "public");
+        assertEquals(publicLicense.license(), "Public Domain");
+        assertEquals(publicLicense.name(), "John Q. Public");
 
-        assertEquals(limitedLicense.rate, 30);
-        assertEquals(limitedLicense.key, "limited");
-        assertEquals(limitedLicense.license, "CC BY NC SA 4.0");
-        assertEquals(limitedLicense.name, "Contact Info");
+        assertEquals(limitedLicense.ratePerMinute(), 30);
+        assertEquals(limitedLicense.key(), "limited");
+        assertEquals(limitedLicense.license(), "CC BY NC SA 4.0");
+        assertEquals(limitedLicense.name(), "Contact Info");
 
     }
 
     @Test
-    void testLicenseCache() {
+    void testLicenseCache() throws LicenseService.NoSuchKeyException, IOException {
         var publicLicense = service.getLicense("public");
         var publicLicenseAgain = service.getLicense("public");
 
@@ -91,25 +93,26 @@ class LicenseServiceTest {
     }
 
     @Test
-    void testUnknownLiecense() {
-        assertHaltsWithErrorCode(401, () -> service.getLicense("invalid code"));
+    void testUnknownLiecense() throws IOException {
+        try {
+            service.getLicense("invalid code");
+            Assertions.fail();
+        }
+        catch (LicenseService.NoSuchKeyException ex) {}
     }
 
     @Test
-    public void testBadKey() {
-        assertHaltsWithErrorCode(400, () -> service.getLicense(""));
-        assertHaltsWithErrorCode(400, () -> service.getLicense(null));
-    }
-
-    public void assertHaltsWithErrorCode(int expectedCode, Runnable runnable) {
+    public void testBadKey() throws IOException {
         try {
-            runnable.run();
-
-            Assertions.fail("Expected HaltException with status code " + expectedCode + " but no exception was thrown.");
-        } catch (HaltException e) {
-            assertEquals(expectedCode, e.statusCode(), "Expected HaltException with status code " + expectedCode + " but got " + e.statusCode() + " instead.");
+            service.getLicense("");
+            Assertions.fail();
         }
-
+        catch (LicenseService.NoSuchKeyException ex) {}
+        try {
+            service.getLicense("null");
+            Assertions.fail();
+        }
+        catch (LicenseService.NoSuchKeyException ex) {}
     }
 
     public static HikariDataSource getConnection(String connString) {

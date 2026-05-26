@@ -84,6 +84,10 @@ public class WordsTfIdfCounts implements WordReps, Comparator<WordRep> {
         return tfIdf.getOrDefault(stemmed, 0);
     }
 
+    public int getTfIdf(WordRep rep) {
+        return tfIdf.getOrDefault(rep.stemmed, 0);
+    }
+
     @Override
     public Collection<WordRep> getReps() {
         return tfIdfHigh;
@@ -93,7 +97,8 @@ public class WordsTfIdfCounts implements WordReps, Comparator<WordRep> {
         int maxC = 0;
 
         for (int c : map.values()) {
-            maxC = max(c, maxC);
+            if (c > maxC)
+                maxC = c;
         }
 
         return maxC;
@@ -127,6 +132,6 @@ public class WordsTfIdfCounts implements WordReps, Comparator<WordRep> {
 
     @Override
     public int compare(WordRep o1, WordRep o2) {
-        return tfIdf.getOrDefault(o1, 0) - tfIdf.getOrDefault(o2, 0);
+        return Integer.compare(getTfIdf(o1), getTfIdf(o2));
     }
 }

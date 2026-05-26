@@ -3,6 +3,7 @@ package nu.marginalia.actor.proc;
 import com.google.gson.Gson;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
+import nu.marginalia.actor.ActorTimeslot;
 import nu.marginalia.actor.prototype.RecordActorPrototype;
 import nu.marginalia.actor.state.ActorResumeBehavior;
 import nu.marginalia.actor.state.ActorStep;
@@ -14,11 +15,14 @@ import nu.marginalia.mq.persistence.MqPersistence;
 import nu.marginalia.mqapi.ProcessInboxNames;
 import nu.marginalia.mqapi.ping.PingRequest;
 import nu.marginalia.process.ProcessSpawnerService;
+import nu.marginalia.schedule.ActorScheduleRow;
+import nu.marginalia.schedule.ActorScheduleService;
 import nu.marginalia.service.module.ServiceConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
+import java.time.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -34,6 +38,7 @@ public class PingMonitorActor extends RecordActorPrototype {
 
     private final MqPersistence persistence;
     private final ProcessSpawnerService processSpawnerService;
+    private final ActorScheduleService scheduleService;
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
@@ -49,20 +54,24 @@ public class PingMonitorActor extends RecordActorPrototype {
     public record Monitor(int errorAttempts) implements ActorStep {}
     @Resume(behavior = ActorResumeBehavior.RESTART)
     public record Run(int attempts) implements ActorStep {}
+    @Resume(behavior = ActorResumeBehavior.RETRY)
+    public record Wait(String startTs, String endTs) implements ActorStep {
+        public Wait(ActorTimeslot timeslot) {
+            this(timeslot.start().toString(), timeslot.end().toString());
+        }
+    }
     @Terminal
     public record Aborted() implements ActorStep {}
+
+    private ActorTimeslot nextTimeslot() {
+        return new ActorTimeslot.ActorSchedule(scheduleService.getWindow(ActorScheduleRow.Window.DOMAIN_PING)).nextTimeslot();
+    }
 
     @Override
     public ActorStep transition(ActorStep self) throws Exception {
         return switch (self) {
             case Initial i -> {
-                PingRequest request = new PingRequest();
-                persistence.sendNewMessage(inboxName, null, null,
-                        "PingRequest",
-                        gson.toJson(request),
-                        null);
-
-                yield new Monitor(0);
+                yield new Wait(nextTimeslot());
             }
             case Monitor(int errorAttempts) -> {
                 for (;;) {
@@ -95,7 +104,7 @@ public class PingMonitorActor extends RecordActorPrototype {
                         if (attempts < MAX_ATTEMPTS)
                             yield new Run(attempts + 1);
                         else
-                            yield new Error();
+                            yield new Error("Max failed attempts exceeded");
                     }
                     else if (endTime - startTime < TimeUnit.SECONDS.toMillis(1)) {
                         // To avoid boot loops, we transition to error if the process
@@ -116,7 +125,21 @@ public class PingMonitorActor extends RecordActorPrototype {
                     yield new Aborted();
                 }
 
-                yield new Monitor(attempts);
+                yield new Wait(nextTimeslot());
+            }
+            case Wait(String startTs, String endTs) -> {
+                var start = Instant.parse(startTs);
+                var end = Instant.parse(endTs);
+
+                Thread.sleep(Duration.between(Instant.now(), start));
+
+                PingRequest request = new PingRequest(end);
+                persistence.sendNewMessage(inboxName, null, null,
+                        "PingRequest",
+                        gson.toJson(request),
+                        null);
+
+                yield new Monitor(0);
             }
             default -> new Error();
         };
@@ -128,14 +151,16 @@ public class PingMonitorActor extends RecordActorPrototype {
 
     @Inject
     public PingMonitorActor(Gson gson,
-                                       ServiceConfiguration configuration,
-                                       MqPersistence persistence,
-                                       ProcessSpawnerService processSpawnerService) throws SQLException {
+                            ServiceConfiguration configuration,
+                            MqPersistence persistence,
+                            ProcessSpawnerService processSpawnerService,
+                            ActorScheduleService scheduleService) throws SQLException {
         super(gson);
         this.gson = gson;
         this.node = configuration.node();
         this.persistence = persistence;
         this.processSpawnerService = processSpawnerService;
+        this.scheduleService = scheduleService;
         this.inboxName = ProcessInboxNames.PING_INBOX + ":" + node;
         this.processId = ProcessSpawnerService.ProcessId.PING;
     }

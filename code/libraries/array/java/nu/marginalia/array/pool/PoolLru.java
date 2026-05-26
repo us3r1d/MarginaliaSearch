@@ -18,7 +18,7 @@ public class PoolLru {
     private final MemoryPage[] pages;
 
     private final int[] freeQueue;
-    private volatile long reclaimCycles;
+    private final AtomicLong reclaimCycles;
     private final AtomicLong clockWriteIdx;
     private final AtomicLong clockReadIdx;
 
@@ -44,6 +44,7 @@ public class PoolLru {
 
         clockReadIdx = new AtomicLong();
         clockWriteIdx = new AtomicLong(freeQueue.length);
+        reclaimCycles = new AtomicLong();
 
         reclaimThread = Thread.ofPlatform().start(this::reclaimThread);
     }
@@ -53,6 +54,7 @@ public class PoolLru {
         reclaimThread.interrupt();
         reclaimThread.join();
     }
+
     /** Attempt to get a buffer already associated with the address */
     public MemoryPage get(long address) {
         var res = getAssociatedItem(address);
@@ -108,21 +110,23 @@ public class PoolLru {
      * @return An unheld buffer, or null if the attempt failed
      * */
     public MemoryPage getFree() {
-        for (;;) {
+        for (int iter = 0;; iter++) {
             var readIdx = clockReadIdx.get();
             var writeIdx = clockWriteIdx.get();
 
             if (writeIdx - readIdx == freeQueue.length / 4) {
                 LockSupport.unpark(reclaimThread);
             } else if (readIdx == writeIdx) {
-                LockSupport.unpark(reclaimThread);
-                synchronized (this) {
-                    try {
-                        wait(0, 1000);
-                    } catch (InterruptedException e) {
-                        throw new RuntimeException(e);
+                if ((iter % 10000) == 0) {
+                    if (!running) {
+                        // This shouldn't be possible, but just in case we encounter this state,
+                        // let's blow up loudly and visibly rather than stall forever.
+                        throw new IllegalStateException("PoolLru is no longer running");
                     }
+                    LockSupport.unpark(reclaimThread);
                 }
+
+                Thread.yield();
                 continue;
             }
 
@@ -135,22 +139,25 @@ public class PoolLru {
     private void reclaimThread() {
         int pageIdx = 0;
 
+        int targetQueueSize = freeQueue.length / 2;
+
         while (running && !Thread.interrupted()) {
             long readIdx = clockReadIdx.get();
             long writeIdx = clockWriteIdx.get();
+
             int queueSize = (int) (writeIdx - readIdx);
-            int targetQueueSize = freeQueue.length / 2;
 
             if (queueSize >= targetQueueSize) {
-                LockSupport.parkNanos(100_000);
+                LockSupport.parkNanos(10_000);
                 continue;
             }
 
             int toClaim = targetQueueSize - queueSize;
-            if (toClaim == 0)
+            if (toClaim < 0)
                 continue;
 
-            ++reclaimCycles;
+            reclaimCycles.incrementAndGet();
+
             do {
                 if (++pageIdx >= pages.length) {
                     pageIdx = 0;
@@ -159,8 +166,9 @@ public class PoolLru {
 
                 if (currentPage.decreaseClock()) {
                     if (!currentPage.isHeld()) {
-                        freeQueue[(int) (clockWriteIdx.getAndIncrement() % freeQueue.length)] = pageIdx;
                         deregister(pages[pageIdx]);
+                        freeQueue[(int) (clockWriteIdx.get() % freeQueue.length)] = pageIdx;
+                        clockWriteIdx.incrementAndGet();
                         toClaim--;
                     }
                     else {
@@ -169,10 +177,6 @@ public class PoolLru {
                 }
 
             } while (running && toClaim >= 0);
-
-            synchronized (this) {
-                notifyAll();
-            }
         }
     }
 
@@ -181,6 +185,6 @@ public class PoolLru {
     }
 
     public long getReclaimCycles() {
-        return reclaimCycles;
+        return reclaimCycles.get();
     }
 }

@@ -36,9 +36,10 @@ dependencies {
     implementation project(':code:functions:language-processing')
 
     implementation project(':code:functions:link-graph:api')
-    implementation project(':code:functions:live-capture:api')
+    implementation project(':code:index:live-capture')
+    implementation project(':code:index:live-capture:api')
     implementation project(':code:functions:search-query')
-    implementation project(':code:functions:nsfw-domain-filter')
+    implementation project(':code:functions:nsfw-filter')
     implementation project(':code:execution:api')
 
     implementation project(':code:processes:crawling-process:model')
@@ -49,11 +50,7 @@ dependencies {
     implementation project(':third-party:encyclopedia-marginalia-nu')
 
     implementation libs.bundles.slf4j
-
-    implementation dependencies.create(libs.spark.get()) {
-        exclude group: 'org.eclipse.jetty'
-    }
-    implementation libs.bundles.jetty
+    implementation libs.bundles.jooby
 
     implementation libs.guava
     libs.bundles.grpc.get().each {
@@ -64,6 +61,7 @@ dependencies {
 
 
     implementation libs.gson
+    implementation libs.slop
     implementation libs.prometheus
     implementation libs.notnull
     implementation libs.guava
@@ -82,10 +80,13 @@ dependencies {
     testImplementation libs.bundles.junit
     testImplementation libs.mockito
 
-    testImplementation platform('org.testcontainers:testcontainers-bom:1.17.4')
+    testImplementation platform('org.testcontainers:testcontainers-bom:1.21.4') {
+        exclude group: 'org.apache.commons'
+    }
+    testImplementation libs.commons.compress
     testImplementation libs.commons.codec
-    testImplementation 'org.testcontainers:mariadb:1.17.4'
-    testImplementation 'org.testcontainers:junit-jupiter:1.17.4'
+    testImplementation 'org.testcontainers:mariadb:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
     testImplementation project(':code:libraries:test-helpers')
 
 }

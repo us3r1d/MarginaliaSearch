@@ -6,8 +6,8 @@
                 <LevelMatchFilter level="INFO" onMatch="ALLOW" onMismatch="DENY"/>
                 <MarkerFilter marker="PROCESS" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="QUERY" onMatch="DENY" onMismatch="NEUTRAL" />
+                <MarkerFilter marker="APIUSAGE" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="HTTP" onMatch="DENY" onMismatch="NEUTRAL" />
-                <MarkerFilter marker="CRAWLER" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="CONVERTER" onMatch="DENY" onMismatch="NEUTRAL" />
             </Filters>
         </Console>
@@ -17,8 +17,8 @@
                 <LevelMatchFilter level="WARN" onMatch="ALLOW" onMismatch="DENY"/>
                 <MarkerFilter marker="PROCESS" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="QUERY" onMatch="DENY" onMismatch="NEUTRAL" />
+                <MarkerFilter marker="APIUSAGE" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="HTTP" onMatch="DENY" onMismatch="NEUTRAL" />
-                <MarkerFilter marker="CRAWLER" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="CONVERTER" onMatch="DENY" onMismatch="NEUTRAL" />
             </Filters>
         </Console>
@@ -28,8 +28,8 @@
                 <LevelMatchFilter level="ERROR" onMatch="ALLOW" onMismatch="DENY"/>
                 <MarkerFilter marker="PROCESS" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="QUERY" onMatch="DENY" onMismatch="NEUTRAL" />
+                <MarkerFilter marker="APIUSAGE" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="HTTP" onMatch="DENY" onMismatch="NEUTRAL" />
-                <MarkerFilter marker="CRAWLER" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="CONVERTER" onMatch="DENY" onMismatch="NEUTRAL" />
             </Filters>
         </Console>
@@ -39,8 +39,8 @@
                 <LevelMatchFilter level="FATAL" onMatch="ALLOW" onMismatch="DENY"/>
                 <MarkerFilter marker="PROCESS" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="QUERY" onMatch="DENY" onMismatch="NEUTRAL" />
+                <MarkerFilter marker="APIUSAGE" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="HTTP" onMatch="DENY" onMismatch="NEUTRAL" />
-                <MarkerFilter marker="CRAWLER" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="CONVERTER" onMatch="DENY" onMismatch="NEUTRAL" />
             </Filters>
         </Console>
@@ -60,18 +60,8 @@
                 <MarkerFilter marker="PROCESS" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="QUERY" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="HTTP" onMatch="DENY" onMismatch="NEUTRAL" />
-                <MarkerFilter marker="CRAWLER" onMatch="DENY" onMismatch="NEUTRAL" />
                 <MarkerFilter marker="CONVERTER" onMatch="DENY" onMismatch="NEUTRAL" />
-            </Filters>
-        </RollingFile>
-        <RollingFile name="LogToFileCrawler" fileName="${env:WMSA_LOG_DIR:-/var/log/wmsa}/crawler-audit-${env:WMSA_SERVICE_NODE:-0}.log" filePattern="${env:WMSA_LOG_DIR:-/var/log/wmsa}/crawler-audit-${env:WMSA_SERVICE_NODE:-0}-log-%d{MM-dd-yy-HH-mm-ss}-%i.log.gz"
-                     ignoreExceptions="false">
-            <PatternLayout>
-                <Pattern>%d{yyyy-MM-dd HH:mm:ss,SSS}: %msg{nolookups}%n</Pattern>
-            </PatternLayout>
-            <SizeBasedTriggeringPolicy size="100MB" />
-            <Filters>
-                <MarkerFilter marker="CRAWLER" onMatch="ALLOW" onMismatch="DENY" />
+                <MarkerFilter marker="APIUSAGE" onMatch="DENY" onMismatch="NEUTRAL" />
             </Filters>
         </RollingFile>
         <RollingFile name="LogToFileConverter" fileName="${env:WMSA_LOG_DIR:-/var/log/wmsa}/converter-audit-${env:WMSA_SERVICE_NODE:-0}.log" filePattern="${env:WMSA_LOG_DIR:-/var/log/wmsa}/converter-audit-${env:WMSA_SERVICE_NODE:-0}-log-%d{MM-dd-yy-HH-mm-ss}-%i.log.gz"
@@ -82,6 +72,16 @@
             <SizeBasedTriggeringPolicy size="100MB" />
             <Filters>
                 <MarkerFilter marker="CONVERTER" onMatch="ALLOW" onMismatch="DENY" />
+            </Filters>
+        </RollingFile>
+        <RollingFile name="LogToFileApiUsage" fileName="${env:WMSA_LOG_DIR:-/var/log/wmsa}/api-usage-${env:WMSA_SERVICE_NODE:-0}.log" filePattern="${env:WMSA_LOG_DIR:-/var/log/wmsa}/api-usage-${env:WMSA_SERVICE_NODE:-0}-log-%d{MM-dd-yy-HH-mm-ss}-%i.log.gz"
+                     ignoreExceptions="false">
+            <PatternLayout>
+                <Pattern>%d{yyyy-MM-dd HH:mm:ss,SSS}: %msg{nolookups}%n</Pattern>
+            </PatternLayout>
+            <SizeBasedTriggeringPolicy size="100MB" />
+            <Filters>
+                <MarkerFilter marker="APIUSAGE" onMatch="ALLOW" onMismatch="DENY" />
             </Filters>
         </RollingFile>
     </Appenders>
@@ -100,8 +100,8 @@
             <AppenderRef ref="ConsoleFatal"/>
             <AppenderRef ref="ProcessConsole"/>
             <AppenderRef ref="LogToFileService"/>
-            <AppenderRef ref="LogToFileConverer"/>
-            <AppenderRef ref="LogToFileCrawler"/>
+            <AppenderRef ref="LogToFileConverter"/>
+            <AppenderRef ref="LogToFileApiUsage"/>
         </Root>
     </Loggers>
 </Configuration>

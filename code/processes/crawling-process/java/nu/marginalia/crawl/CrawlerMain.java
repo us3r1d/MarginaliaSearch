@@ -5,14 +5,15 @@ import com.google.inject.Guice;
 import com.google.inject.Inject;
 import com.google.inject.Injector;
 import com.zaxxer.hikari.HikariDataSource;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
 import nu.marginalia.UserAgent;
 import nu.marginalia.WmsaHome;
 import nu.marginalia.atags.model.DomainLinks;
 import nu.marginalia.atags.source.AnchorTagsSource;
 import nu.marginalia.atags.source.AnchorTagsSourceFactory;
-import nu.marginalia.coordination.DomainCoordinationModule;
 import nu.marginalia.coordination.DomainCoordinator;
 import nu.marginalia.coordination.DomainLock;
+import nu.marginalia.crawl.fetcher.CrawlerAuditLog;
 import nu.marginalia.crawl.fetcher.HttpFetcherImpl;
 import nu.marginalia.crawl.fetcher.warc.WarcRecorder;
 import nu.marginalia.crawl.retreival.CrawlDataReference;
@@ -33,7 +34,6 @@ import nu.marginalia.process.log.WorkLog;
 import nu.marginalia.service.discovery.ServiceRegistryIf;
 import nu.marginalia.service.module.DatabaseModule;
 import nu.marginalia.service.module.ServiceDiscoveryModule;
-import nu.marginalia.slop.SlopCrawlDataRecord;
 import nu.marginalia.storage.FileStorageService;
 import nu.marginalia.storage.model.FileStorageId;
 import nu.marginalia.util.SimpleBlockingThreadPool;
@@ -41,11 +41,13 @@ import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.Security;
+import java.sql.Timestamp;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -53,6 +55,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static nu.marginalia.mqapi.ProcessInboxNames.CRAWLER_INBOX;
+import static nu.marginalia.slop.SlopCrawlDataRecord.convertWarc;
 
 public class CrawlerMain extends ProcessMainClass {
     private final static Logger logger = LoggerFactory.getLogger(CrawlerMain.class);
@@ -72,24 +75,28 @@ public class CrawlerMain extends ProcessMainClass {
 
     private final DomainCoordinator domainCoordinator;
 
+    private final Map<EdgeDomain, DomainAvailability> availabilityData = new HashMap<>();
+
     private final Map<String, CrawlTask> pendingCrawlTasks = new ConcurrentHashMap<>();
 
     private final LinkedBlockingQueue<CrawlTask> retryQueue = new LinkedBlockingQueue<>();
 
     private final AtomicInteger tasksDone = new AtomicInteger(0);
     private final HttpFetcherImpl fetcher;
+    private final CrawlerAuditLog auditLog;
 
     private int totalTasks = 1;
 
     private static final double URL_GROWTH_FACTOR = Double.parseDouble(System.getProperty("crawler.crawlSetGrowthFactor", "1.25"));
     private static final int MIN_URLS_PER_DOMAIN = Integer.getInteger("crawler.minUrlsPerDomain", 100);
-    private static final int MID_URLS_PER_DOMAIN = Integer.getInteger("crawler.minUrlsPerDomain", 2_000);
+    private static final int MID_URLS_PER_DOMAIN = Integer.getInteger("crawler.midUrlsPerDomain", 2_000);
     private static final int MAX_URLS_PER_DOMAIN = Integer.getInteger("crawler.maxUrlsPerDomain", 10_000);
 
 
     @Inject
     public CrawlerMain(UserAgent userAgent,
                        HttpFetcherImpl httpFetcher,
+                       CrawlerAuditLog auditLog,
                        ProcessHeartbeatImpl heartbeat,
                        ProcessEventLog eventLog,
                        MessageQueueFactory messageQueueFactory, DomainProber domainProber,
@@ -107,6 +114,7 @@ public class CrawlerMain extends ProcessMainClass {
 
         this.userAgent = userAgent;
         this.fetcher = httpFetcher;
+        this.auditLog = auditLog;
         this.heartbeat = heartbeat;
         this.eventLog = eventLog;
         this.domainProber = domainProber;
@@ -165,7 +173,6 @@ public class CrawlerMain extends ProcessMainClass {
                     new CrawlerModule(),
                     new ProcessConfigurationModule("crawler"),
                     new ServiceDiscoveryModule(),
-                    new DomainCoordinationModule(),
                     new DatabaseModule(false)
             );
             var crawler = injector.getInstance(CrawlerMain.class);
@@ -190,6 +197,7 @@ public class CrawlerMain extends ProcessMainClass {
                 instructions.err();
             }
             finally {
+                crawler.auditLog.close();
                 crawler.serviceRegistry.deregisterProcess("crawler", crawler.node);
             }
 
@@ -231,6 +239,8 @@ public class CrawlerMain extends ProcessMainClass {
                 assignFreeDomains.executeUpdate();
             }
 
+            IntArrayList domainIds = new IntArrayList(100_000);
+
             try (var query = conn.prepareStatement("""
                      SELECT DOMAIN_NAME, COALESCE(VISITED_URLS, 0), EC_DOMAIN.ID
                      FROM EC_DOMAIN
@@ -247,6 +257,7 @@ public class CrawlerMain extends ProcessMainClass {
                     int domainId = rs.getInt(3);
                     if (blacklist.isBlacklisted(domainId))
                         continue;
+                    domainIds.add(domainId);
 
                     int existingUrls = rs.getInt(2);
                     String domainName = rs.getString(1);
@@ -256,9 +267,68 @@ public class CrawlerMain extends ProcessMainClass {
                     totalTasks++;
                 }
             }
+
+            logger.info("Loaded {} domains", crawlSpecRecords.size());
+
+            try (var ps = conn.prepareStatement("""
+                SELECT DOMAIN_NAME, HTTP_SCHEMA, SERVER_AVAILABLE, TS_LAST_PING, TS_LAST_AVAILABLE, TS_LAST_ERROR
+                FROM DOMAIN_AVAILABILITY_INFORMATION
+                INNER JOIN EC_DOMAIN ON EC_DOMAIN.ID=DOMAIN_ID
+                WHERE DOMAIN_ID = ? 
+                    """)
+            ) {
+                Instant now = Instant.now();
+
+                for (int id : domainIds) {
+                    ps.setInt(1, id);
+                    var rs = ps.executeQuery();
+
+                    if (rs.next()) {
+                        String domainName = rs.getString("DOMAIN_NAME");
+                        String httpSchema = rs.getString("HTTP_SCHEMA");
+
+                        boolean serverAvailable = rs.getBoolean("SERVER_AVAILABLE");
+
+                        Instant tsLastPing = Optional.ofNullable(rs.getTimestamp("TS_LAST_PING"))
+                                .map(Timestamp::toInstant)
+                                .orElse(Instant.EPOCH);
+                        Instant tsLastAvailable = Optional.ofNullable(rs.getTimestamp("TS_LAST_AVAILABLE"))
+                                .map(Timestamp::toInstant)
+                                .orElse(Instant.EPOCH);
+                        Instant tsLastError = Optional.ofNullable(rs.getTimestamp("TS_LAST_ERROR"))
+                                .map(Timestamp::toInstant)
+                                .orElse(Instant.EPOCH);
+
+                        if (tsLastPing.isBefore(now.minus(Duration.ofDays(3)))) {
+                            continue; // data is stale, nothing can be said
+                        }
+
+                        boolean recentError = tsLastError.isAfter(now.minus(Duration.ofDays(7)));
+                        boolean recentAvailable = tsLastAvailable.isAfter(now.minus(Duration.ofDays(7)));
+
+                        if (serverAvailable) {
+                            availabilityData.put(new EdgeDomain(domainName), DomainAvailability.REACHABLE);
+                        } else if (recentError && recentAvailable) {
+                            availabilityData.put(new EdgeDomain(domainName), DomainAvailability.FLAKEY);
+                        } else {
+                            availabilityData.put(new EdgeDomain(domainName), DomainAvailability.MISSING);
+                        }
+                    }
+                }
+            }
+
+            logger.info("Fetched availability data");
+
+            // Remove crawl tasks for domains we haven't seen in a long time
+            int sizeOriginal = domainsToCrawl.size();
+
+            domainsToCrawl.removeIf(domain -> availabilityData.get(domain) == DomainAvailability.MISSING);
+
+            if (domainsToCrawl.size() != sizeOriginal) {
+                logger.info("Removed {} crawl tasks for unreachable domains", (sizeOriginal - domainsToCrawl.size()));
+            }
         }
 
-        logger.info("Loaded {} domains", crawlSpecRecords.size());
 
         crawlSpecRecords.sort(crawlSpecArrangement(crawlSpecRecords));
 
@@ -471,7 +541,7 @@ public class CrawlerMain extends ProcessMainClass {
                 return;
             }
 
-            Optional<DomainLock> lock = domainCoordinator.tryLockDomain(new EdgeDomain(domain));
+            Optional<DomainLock> lock = domainCoordinator.tryLockDomain(new EdgeDomain(domain), Duration.ofSeconds(2));
             // We don't have a lock, so we can't run this task
             // we return to avoid blocking the pool for too long
             if (lock.isEmpty()) {
@@ -509,22 +579,51 @@ public class CrawlerMain extends ProcessMainClass {
 
                     DomainLinks domainLinks = anchorTagsSource.getAnchorTags(domain);
 
-                    int size = retriever.crawlDomain(domainLinks, reference);
+                    DomainAvailability availability = availabilityData.getOrDefault(new EdgeDomain(domain), DomainAvailability.DATA_MISSING);
 
-                    // Delete the reference crawl data if it's not the same as the new one
-                    // (mostly a case when migrating from legacy->warc)
-                    reference.delete();
+                    final boolean domainRecentlyAvailable =  availability == DomainAvailability.REACHABLE
+                                                          || availability == DomainAvailability.FLAKEY;
 
-                    // Convert the WARC file to Slop
-                    SlopCrawlDataRecord
-                            .convertWarc(domain, userAgent, newWarcFile, slopFile);
+                    final boolean hasOldSlopFile = Files.exists(slopFile);
+
+                    switch (retriever.crawlDomain(domainLinks, reference)) {
+
+                        // Success case
+                        case CrawlerRetreiver.CrawlerResult.Crawled(int size) -> {
+                            reference.delete();
+                            convertWarc(domain, userAgent, newWarcFile, slopFile);
+                            workLog.setJobToFinished(domain, slopFile.toString(), size);
+                        }
+
+                        // Non-Error cases where we have no crawl data
+
+                        case CrawlerRetreiver.CrawlerResult.Blocked() -> {
+                            reference.delete();
+                            workLog.setJobToFinished(domain, slopFile.toString(), 0, "Blocked");
+                        }
+
+                        case CrawlerRetreiver.CrawlerResult.Redirect() -> {
+                            reference.delete();
+                            workLog.setJobToFinished(domain, slopFile.toString(), 0, "Redirect");
+                        }
+
+                        // Error, but the site was seen recently
+                        case CrawlerRetreiver.CrawlerResult.Error(String why)
+                                when hasOldSlopFile && domainRecentlyAvailable -> {
+                            // Retain existing crawl data since the error is new, possibly transient
+                            workLog.setJobToFinished(domain, slopFile.toString(), 0, availability.name() + ": " + why);
+                        }
+
+                        // Error, but we haven't seen the site recently
+                        case CrawlerRetreiver.CrawlerResult.Error(String why) -> {
+                            reference.delete();
+                            workLog.setJobToFinished(domain, slopFile.toString(), 0, availability.name() + ": " + why);
+                        }
+                    }
 
                     // Optionally archive the WARC file if full retention is enabled,
                     // otherwise delete it:
                     warcArchiver.consumeWarc(newWarcFile, domain);
-
-                    // Mark the domain as finished in the work log
-                    workLog.setJobToFinished(domain, slopFile.toString(), size);
 
                     // Update the progress bar
                     heartbeat.setProgress(tasksDone.incrementAndGet() / (double) totalTasks);
@@ -550,13 +649,6 @@ public class CrawlerMain extends ProcessMainClass {
                 if (Files.exists(slopPath)) {
                     return new CrawlDataReference(slopPath);
                 }
-
-                Path parquetPath = CrawlerOutputFile.getParquetPath(outputDir, id, domain);
-                if (Files.exists(parquetPath)) {
-                    slopPath = migrateParquetData(parquetPath, domain, outputDir);
-                    return new CrawlDataReference(slopPath);
-                }
-
             } catch (Exception e) {
                 logger.debug("Failed to read previous crawl data for {}", specification.domain());
             }
@@ -622,19 +714,12 @@ public class CrawlerMain extends ProcessMainClass {
         }
     }
 
-    // Migrate from parquet to slop if necessary
-    //
-    // This must be synchronized as chewing through parquet files in parallel leads to enormous memory overhead
-    private synchronized Path migrateParquetData(Path inputPath, String domain, Path crawlDataRoot) throws IOException {
-        if (!inputPath.toString().endsWith(".parquet")) {
-            return inputPath;
-        }
 
-        Path outputFile = CrawlerOutputFile.createSlopPath(crawlDataRoot, Integer.toHexString(domain.hashCode()), domain);
+}
 
-        SlopCrawlDataRecord.convertFromParquet(inputPath, outputFile);
-
-        return outputFile;
-    }
-
+enum DomainAvailability {
+    DATA_MISSING,
+    REACHABLE,
+    FLAKEY,
+    MISSING
 }

@@ -5,8 +5,7 @@ import com.google.inject.Inject;
 import com.google.inject.Injector;
 import io.jooby.ExecutionMode;
 import io.jooby.Jooby;
-import nu.marginalia.coordination.DomainCoordinationModule;
-import nu.marginalia.livecapture.LivecaptureModule;
+import io.jooby.Server;
 import nu.marginalia.service.MainClass;
 import nu.marginalia.service.ServiceId;
 import nu.marginalia.service.discovery.ServiceRegistryIf;
@@ -29,11 +28,8 @@ public class AssistantMain extends MainClass {
 
         Injector injector = Guice.createInjector(
                 new AssistantModule(),
-                new LivecaptureModule(),
-                new DomainCoordinationModule(),
                 new ServiceConfigurationModule(ServiceId.Assistant),
                 new ServiceDiscoveryModule(),
-                new DomainCoordinationModule(),
                 new DatabaseModule(false)
         );
 
@@ -46,11 +42,15 @@ public class AssistantMain extends MainClass {
         var main = injector.getInstance(AssistantMain.class);
         injector.getInstance(Initialization.class).setReady();
 
-        Jooby.runApp(new String[] { "application.env=prod" }, ExecutionMode.WORKER, () -> new Jooby() {
+        Jooby.runApp(new String[] { "application.env=prod" }, main.server(), ExecutionMode.WORKER, () -> new Jooby() {
             {
                 main.start(this);
             }
         });
+    }
+
+    public Server server() {
+        return service.createServer();
     }
 
     public void start(Jooby jooby) {

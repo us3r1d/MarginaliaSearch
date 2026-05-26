@@ -73,6 +73,15 @@ public class LongQueryBuffer {
         return n;
     }
 
+    public int addData(long[] newData, int start, int nMax) {
+        int n = Math.min(nMax, (int) data.size() - end);
+
+        MemorySegment.copy(newData, start, data.getMemorySegment(), ValueLayout.JAVA_LONG, 8L*end, n);
+
+        end += n;
+
+        return n;
+    }
     /** Dispose of the buffer and release resources */
     public void dispose() {
         data.close();
@@ -182,6 +191,27 @@ public class LongQueryBuffer {
         read = 0;
         write = 0;
     }
+
+    /** Finalizes the filtering by setting the end pointer to the write pointer,
+     * and resetting the read and write pointers to zero.  This version of the function
+     * also sorts the data as it needs to be ascending for subsequent filtering passes.
+     * <p></p>
+     * At this point the buffer can either be read, or additional filtering can be applied.
+     */
+    public void finalizeMultipass() {
+        data.sort(0, write);
+
+        end = write;
+        read = 0;
+        write = 0;
+    }
+
+
+    /** Resets the buffer so that the rejected values can be re-evaluated with another filter */
+    public void tryOther() {
+        read = write;
+    }
+
 
     /**  Retain only unique values in the buffer, and update the end pointer to the new length.
      * <p></p>

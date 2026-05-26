@@ -12,16 +12,14 @@ java {
 apply from: "$rootProject.projectDir/srcsets.gradle"
 
 dependencies {
-    implementation 'org.jgrapht:jgrapht-core:1.5.2'
-
     implementation project(':third-party:commons-codec')
-    implementation project(':third-party:parquet-floor')
 
     implementation project(':code:index:api')
     implementation project(':code:functions:link-graph:api')
 
     implementation project(':code:libraries:array')
     implementation project(':code:libraries:btree')
+    implementation project(':code:libraries:buffering')
     implementation project(':code:libraries:skiplist')
     implementation project(':code:libraries:native')
     implementation project(':code:libraries:random-write-funnel')
@@ -69,13 +67,17 @@ dependencies {
     testImplementation libs.bundles.slf4j.test
     testImplementation libs.bundles.junit
     testImplementation libs.mockito
+    testImplementation libs.bundles.curator
     testImplementation libs.commons.lang3
     testImplementation project(':code:libraries:array')
 
-    testImplementation platform('org.testcontainers:testcontainers-bom:1.17.4')
+    testImplementation platform('org.testcontainers:testcontainers-bom:1.21.4') {
+        exclude group: 'org.apache.commons'
+    }
+    testImplementation libs.commons.compress
     testImplementation libs.commons.codec
-    testImplementation 'org.testcontainers:mariadb:1.17.4'
-    testImplementation 'org.testcontainers:junit-jupiter:1.17.4'
+    testImplementation 'org.testcontainers:mariadb:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
     testImplementation project(':code:libraries:test-helpers')
     testImplementation project(':code:functions:language-processing')
     testImplementation project(':code:libraries:braille-block-punch-cards')

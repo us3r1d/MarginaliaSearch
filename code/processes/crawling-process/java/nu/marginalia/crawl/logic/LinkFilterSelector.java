@@ -12,20 +12,41 @@ public class LinkFilterSelector {
        very beneficial to cherry-pick the URLs that we want to crawl to
        exclude e.g. user profiles, and other similar noise.
      */
-    public Predicate<EdgeUrl> selectFilter(Document doc) {
+    public Predicate<EdgeUrl> selectFilter(Document doc, EdgeUrl docUrl) {
 
+        if (docUrl.domain.topDomain.equalsIgnoreCase("blogspot.com")) {
+            return url -> {
+                if (url.path.startsWith("/feeds")) {
+                    return false;
+                }
+
+                return true;
+            };
+        }
+
+        if (docUrl.domain.topDomain.equalsIgnoreCase("substack.com")) {
+            return url -> {
+                if (url.path.endsWith("/comments")) {
+                    return false;
+                }
+
+                return true;
+            };
+        }
         var head = doc.getElementsByTag("head").first();
         if (null == head) {
-            return url -> true;
+            return LinkFilterSelector::defaultFilter;
         }
 
         if (isLemmy(head)) {
             return url -> url.path.startsWith("/post/")
                || (url.path.startsWith("/c/") && !url.path.contains("@"));
         }
+
         if (isDiscourse(head)) {
             return url -> url.path.startsWith("/t/") || url.path.contains("/latest");
         }
+
         if (isMediawiki(head)) {
             return url -> {
                 if (url.path.endsWith(".php")) {

@@ -1,8 +1,9 @@
 package nu.marginalia.mqapi.ping;
 
-public class PingRequest {
+import java.time.Instant;
 
-    public PingRequest() {
-
+public record PingRequest(String endTs) {
+    public PingRequest(Instant endTs) {
+        this(endTs.toString());
     }
 }

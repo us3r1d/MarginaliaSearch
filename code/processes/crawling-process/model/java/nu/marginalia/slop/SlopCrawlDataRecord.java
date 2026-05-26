@@ -5,8 +5,6 @@ import nu.marginalia.UserAgent;
 import nu.marginalia.model.body.DocumentBodyExtractor;
 import nu.marginalia.model.body.DocumentBodyResult;
 import nu.marginalia.model.body.HttpFetchResult;
-import nu.marginalia.parquet.crawldata.CrawledDocumentParquetRecord;
-import nu.marginalia.parquet.crawldata.CrawledDocumentParquetRecordFileReader;
 import nu.marginalia.slop.column.array.ByteArrayColumn;
 import nu.marginalia.slop.column.primitive.ByteColumn;
 import nu.marginalia.slop.column.primitive.IntColumn;
@@ -23,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.net.IDN;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -43,31 +42,16 @@ public record SlopCrawlDataRecord(String domain,
                                   int requestTimeMs,
                                   String headers)
 {
-    private static final EnumColumn domainColumn = new EnumColumn("domain", StandardCharsets.UTF_8, StorageType.ZSTD);
-    private static final StringColumn urlColumn = new StringColumn("url", StandardCharsets.UTF_8, StorageType.ZSTD);
-    private static final StringColumn ipColumn = new StringColumn("ip", StandardCharsets.ISO_8859_1, StorageType.ZSTD);
-    private static final ByteColumn cookiesColumn = new ByteColumn("cookies");
-    private static final ShortColumn statusColumn = new ShortColumn("httpStatus");
-    private static final LongColumn timestampColumn = new LongColumn("timestamp");
-    private static final EnumColumn contentTypeColumn = new EnumColumn("contentType", StandardCharsets.UTF_8);
-    private static final ByteArrayColumn bodyColumn = new ByteArrayColumn("body", StorageType.ZSTD);
-    private static final ShortColumn requestTimeColumn = new ShortColumn("requestTimeMs");
-    private static final StringColumn headerColumn = new StringColumn("header", StandardCharsets.UTF_8, StorageType.ZSTD);
-
-    public SlopCrawlDataRecord(CrawledDocumentParquetRecord parquetRecord) {
-        this(parquetRecord.domain,
-                parquetRecord.url,
-                parquetRecord.ip,
-                parquetRecord.cookies,
-                parquetRecord.httpStatus,
-                parquetRecord.timestamp.toEpochMilli(),
-                parquetRecord.contentType,
-                parquetRecord.body,
-                -1,
-                parquetRecord.headers
-                );
-    }
-
+    public static final EnumColumn domainColumn = new EnumColumn("domain", StandardCharsets.UTF_8, StorageType.ZSTD);
+    public static final StringColumn urlColumn = new StringColumn("url", StandardCharsets.UTF_8, StorageType.ZSTD);
+    public static final StringColumn ipColumn = new StringColumn("ip", StandardCharsets.ISO_8859_1, StorageType.ZSTD);
+    public static final ByteColumn cookiesColumn = new ByteColumn("cookies");
+    public static final ShortColumn statusColumn = new ShortColumn("httpStatus");
+    public static final LongColumn timestampColumn = new LongColumn("timestamp");
+    public static final EnumColumn contentTypeColumn = new EnumColumn("contentType", StandardCharsets.UTF_8);
+    public static final ByteArrayColumn bodyColumn = new ByteArrayColumn("body", StorageType.ZSTD);
+    public static final ShortColumn requestTimeColumn = new ShortColumn("requestTimeMs");
+    public static final StringColumn headerColumn = new StringColumn("header", StandardCharsets.UTF_8, StorageType.ZSTD);
 
     private static SlopCrawlDataRecord forDomainRedirect(String domain, Instant date, String redirectDomain) {
         return new SlopCrawlDataRecord(domain,
@@ -112,35 +96,6 @@ public record SlopCrawlDataRecord(String domain,
     }
 
 
-    public static void convertFromParquet(Path parquetInput, Path slopOutput) throws IOException {
-        Path tempDir = Files.createTempDirectory(slopOutput.getParent(), "conversion");
-
-        try (var writer = new Writer(tempDir);
-             var stream = CrawledDocumentParquetRecordFileReader.stream(parquetInput))
-        {
-            stream.forEach(
-                parquetRecord -> {
-                    try {
-                        writer.write(new SlopCrawlDataRecord(parquetRecord));
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-        }
-        catch (IOException ex) {
-            FileUtils.deleteDirectory(tempDir.toFile());
-            throw ex;
-        }
-
-        try {
-            SlopTablePacker.packToSlopZip(tempDir, slopOutput);
-            FileUtils.deleteDirectory(tempDir.toFile());
-        }
-        catch (Exception ex) {
-            logger.error("Failed to convert WARC file to Parquet", ex);
-        }
-    }
-
     private static final Logger logger = LoggerFactory.getLogger(SlopCrawlDataRecord.class);
 
     public static void convertWarc(String domain,
@@ -148,7 +103,7 @@ public record SlopCrawlDataRecord(String domain,
                                    Path warcInputFile,
                                    Path slopOutputFile) throws IOException {
 
-        Path tempDir = Files.createTempDirectory(slopOutputFile.getParent(), "slop-"+domain);
+        Path tempDir = Files.createTempDirectory(slopOutputFile.getParent(), "slop-"+ IDN.toASCII(domain));
 
         try (var warcReader = new WarcReader(warcInputFile);
              var slopWriter = new SlopCrawlDataRecord.Writer(tempDir)

@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import nu.marginalia.IndexLocations;
+import nu.marginalia.actor.ActorTimeslot;
 import nu.marginalia.actor.ExecutorActor;
 import nu.marginalia.actor.ExecutorActorStateMachines;
 import nu.marginalia.actor.prototype.RecordActorPrototype;
@@ -11,67 +12,94 @@ import nu.marginalia.actor.state.ActorResumeBehavior;
 import nu.marginalia.actor.state.ActorStep;
 import nu.marginalia.actor.state.Resume;
 import nu.marginalia.api.feeds.FeedsClient;
+import nu.marginalia.schedule.ActorScheduleRow;
+import nu.marginalia.schedule.ActorScheduleService;
+import nu.marginalia.index.journal.IndexJournal;
+import nu.marginalia.language.config.LanguageConfiguration;
 import nu.marginalia.mq.MqMessageState;
 import nu.marginalia.mq.outbox.MqOutbox;
 import nu.marginalia.mqapi.crawling.LiveCrawlRequest;
 import nu.marginalia.process.ProcessOutboxes;
 import nu.marginalia.process.ProcessSpawnerService;
+import nu.marginalia.rss.svc.FeedFetcherService;
+import nu.marginalia.rss.svc.FeedsGrpcService;
 import nu.marginalia.storage.FileStorageService;
 import org.apache.commons.io.FileUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 @Singleton
 public class LiveCrawlActor extends RecordActorPrototype {
 
-    // STATES
     private final ActorProcessWatcher processWatcher;
     private final MqOutbox mqLiveCrawlerOutbox;
     private final ExecutorActorStateMachines executorActorStateMachines;
-    private final FeedsClient feedsClient;
+    private final FeedFetcherService feedFetcherService;
+    private final ActorScheduleService scheduleService;
     private final Logger logger = LoggerFactory.getLogger(getClass());
-
+    private final LanguageConfiguration languageConfiguration;
     private final FileStorageService fileStorageService;
 
     public record Initial() implements ActorStep {}
     @Resume(behavior = ActorResumeBehavior.RETRY)
-    public record Monitor(String feedsHash) implements ActorStep {}
+    public record Monitor(String checkTimeTs, String feedsHash) implements ActorStep {
+        public Monitor(ActorTimeslot timeslot, String feedsHash) {
+            this(timeslot.start().toString(), feedsHash);
+        }
+    }
     @Resume(behavior = ActorResumeBehavior.RESTART)
     public record LiveCrawl(String feedsHash, long msgId) implements ActorStep {
         public LiveCrawl(String feedsHash) { this(feedsHash, -1); }
+    }
+
+    private ActorTimeslot nextTimeslot() {
+        return new ActorTimeslot.ActorSchedule(scheduleService.getTrigger(ActorScheduleRow.Trigger.LIVE_CRAWLER)).nextTimeslot();
     }
 
     @Override
     public ActorStep transition(ActorStep self) throws Exception {
         return switch (self) {
             case Initial() -> {
-                yield new Monitor("-");
+                yield new Monitor(nextTimeslot(), feedFetcherService.getFeedDataHash());
             }
-            case Monitor(String feedsHash) -> {
+            case Monitor(String checkTimeTs, String oldHash) -> {
+                Instant checkTime = Instant.parse(checkTimeTs);
+                Thread.sleep(Duration.between(Instant.now(), checkTime));
+
                 // Sleep initially in case this is during start-up
-                for (;;) {
-                    try {
-                        Thread.sleep(Duration.ofMinutes(15));
-                        String currentHash = feedsClient.getFeedDataHash();
-                        if (!Objects.equals(currentHash, feedsHash)) {
-                            yield new LiveCrawl(currentHash);
-                        }
-                    }
-                    catch (RuntimeException ex) {
-                        logger.error("Failed to fetch feed data hash");
-                    }
+                String newHash = feedFetcherService.getFeedDataHash();
+
+                if (!Objects.equals(newHash, oldHash)) {
+                    yield new LiveCrawl(newHash);
+                }
+                else {
+                    yield new Monitor(nextTimeslot(), oldHash);
                 }
             }
             case LiveCrawl(String feedsHash, long msgId) when msgId < 0 -> {
-                // Clear the index journal before starting the crawl
-                Path indexJournalLocation = IndexLocations.getIndexConstructionArea(fileStorageService).resolve("index-journal");
-                if (Files.isDirectory(indexJournalLocation)) {
-                    FileUtils.deleteDirectory(indexJournalLocation.toFile());
+                // Clear the index journals before starting the crawl
+                Path indexConstructionArea = IndexLocations.getIndexConstructionArea(fileStorageService);
+
+                for (var languageDefinition : languageConfiguration.languages()) {
+                    Path dir = IndexJournal.allocateName(indexConstructionArea, languageDefinition.isoCode());
+
+                    List<Path> indexDirContents = new ArrayList<>();
+                    try (var contentsStream = Files.list(dir)) {
+                        contentsStream.filter(Files::isRegularFile).forEach(indexDirContents::add);
+                    }
+
+                    for (var junkFile: indexDirContents) {
+                        Files.deleteIfExists(junkFile);
+                    }
                 }
 
                 long id = mqLiveCrawlerOutbox.sendAsync(new LiveCrawlRequest());
@@ -87,7 +115,7 @@ public class LiveCrawlActor extends RecordActorPrototype {
                 // Build the index
                 executorActorStateMachines.initFrom(ExecutorActor.CONVERT_AND_LOAD, new ConvertAndLoadActor.Rerank());
 
-                yield new Monitor(feedsHash);
+                yield new Monitor(nextTimeslot(), feedsHash);
             }
             default -> new Error("Unknown state");
         };
@@ -101,15 +129,20 @@ public class LiveCrawlActor extends RecordActorPrototype {
     @Inject
     public LiveCrawlActor(ActorProcessWatcher processWatcher,
                           ProcessOutboxes processOutboxes,
-                          FeedsClient feedsClient,
+                          FeedFetcherService feedFetcherService,
                           Gson gson,
-                          ExecutorActorStateMachines executorActorStateMachines, FileStorageService fileStorageService)
+                          ExecutorActorStateMachines executorActorStateMachines,
+                          ActorScheduleService scheduleService,
+                          LanguageConfiguration languageConfiguration,
+                          FileStorageService fileStorageService)
     {
         super(gson);
         this.processWatcher = processWatcher;
         this.mqLiveCrawlerOutbox = processOutboxes.getLiveCrawlerOutbox();
         this.executorActorStateMachines = executorActorStateMachines;
-        this.feedsClient = feedsClient;
+        this.feedFetcherService = feedFetcherService;
+        this.scheduleService = scheduleService;
+        this.languageConfiguration = languageConfiguration;
         this.fileStorageService = fileStorageService;
     }
 

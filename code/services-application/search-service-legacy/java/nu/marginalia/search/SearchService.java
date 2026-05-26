@@ -1,8 +1,8 @@
 package nu.marginalia.search;
 
 import com.google.inject.Inject;
-import io.prometheus.client.Counter;
-import io.prometheus.client.Histogram;
+import io.prometheus.metrics.core.metrics.Counter;
+import io.prometheus.metrics.core.metrics.Histogram;
 import nu.marginalia.WebsiteUrl;
 import nu.marginalia.search.svc.*;
 import nu.marginalia.service.server.BaseServiceParams;
@@ -10,10 +10,7 @@ import nu.marginalia.service.server.SparkService;
 import nu.marginalia.service.server.StaticResources;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import spark.Request;
-import spark.Response;
-import spark.Route;
-import spark.Spark;
+import spark.*;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -24,13 +21,13 @@ public class SearchService extends SparkService {
     private final StaticResources staticResources;
 
     private static final Logger logger = LoggerFactory.getLogger(SearchService.class);
-    private static final Histogram wmsa_search_service_request_time = Histogram.build()
+    private static final Histogram wmsa_search_service_request_time = Histogram.builder()
             .name("wmsa_search_service_request_time")
-            .linearBuckets(0.05, 0.05, 15)
+            .classicLinearUpperBounds(0.05, 0.05, 15)
             .labelNames("matchedPath", "method")
             .help("Search service request time (seconds)")
             .register();
-    private static final Counter wmsa_search_service_error_count = Counter.build()
+    private static final Counter wmsa_search_service_error_count = Counter.builder()
             .name("wmsa_search_service_error_count")
             .labelNames("matchedPath", "method")
             .help("Search service error count")
@@ -55,6 +52,9 @@ public class SearchService extends SparkService {
 
         Spark.staticFiles.expireTime(600);
 
+        Spark.before("/search", this::denyPrefetch);
+        Spark.before("/site/:site", this::denyPrefetch);
+
         SearchServiceMetrics.get("/search", searchQueryService::pathSearch);
 
         SearchServiceMetrics.get("/", frontPageService::render);
@@ -72,13 +72,18 @@ public class SearchService extends SparkService {
 
         Spark.exception(Exception.class, (e,p,q) -> {
             logger.error("Error during processing", e);
-            wmsa_search_service_error_count.labels(p.pathInfo(), p.requestMethod()).inc();
+            wmsa_search_service_error_count.labelValues(p.pathInfo(), p.requestMethod()).inc();
             errorPageService.serveError(p, q);
         });
 
         Spark.awaitInitialization();
     }
 
+
+    private void denyPrefetch(Request request, Response response) {
+        if (request.headers().contains("Sec-Purpose"))
+            Spark.halt(400);
+    }
 
 
     /** Wraps a route with a timer and a counter */
@@ -99,8 +104,15 @@ public class SearchService extends SparkService {
         @Override
         public Object handle(Request request, Response response) throws Exception {
             return wmsa_search_service_request_time
-                    .labels(request.matchedPath(), request.requestMethod())
-                    .time(() -> delegatedRoute.handle(request, response));
+                    .labelValues(request.matchedPath(), request.requestMethod())
+                    .time(() -> {
+                        try {
+                            return delegatedRoute.handle(request, response);
+                        } catch (Exception e) {
+                            logger.error("Error", e);
+                            throw new RuntimeException(e);
+                        }
+                    });
         }
     }
 

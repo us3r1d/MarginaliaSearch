@@ -2,13 +2,16 @@ package nu.marginalia.service.client;
 
 import com.google.common.collect.Sets;
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.prometheus.metrics.core.metrics.Counter;
 import nu.marginalia.service.discovery.ServiceRegistryIf;
 import nu.marginalia.service.discovery.monitor.ServiceChangeMonitor;
 import nu.marginalia.service.discovery.property.PartitionTraits;
 import nu.marginalia.service.discovery.property.ServiceEndpoint.InstanceAddress;
 import nu.marginalia.service.discovery.property.ServiceKey;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.Marker;
@@ -16,9 +19,7 @@ import org.slf4j.MarkerFactory;
 
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Function;
@@ -32,9 +33,30 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
     private final Marker grpcMarker = MarkerFactory.getMarker("GRPC");
     private static final Logger logger = LoggerFactory.getLogger(GrpcSingleNodeChannelPool.class);
 
+    private static final Counter requestCounter = Counter.builder().name("wmsa_rpc_requests")
+            .help("Request count")
+            .labelNames("serviceKey")
+            .build();
+
+    private static final Counter errorCounter = Counter.builder().name("wmsa_rpc_errors")
+            .help("Error count")
+            .labelNames("serviceKey")
+            .build();
+
     private final ServiceRegistryIf serviceRegistryIf;
     private final Function<InstanceAddress, ManagedChannel> channelConstructor;
-    private final Function<ManagedChannel, STUB> stubConstructor;
+    private final Function<ManagedChannel, STUB> defaultStubConstructor;
+
+    // We don't really need more than one of these across all pools in a process
+    private static final ScheduledExecutorService connectionPoolScheduledJobExecutor =
+            Executors.newSingleThreadScheduledExecutor(
+                    Thread.ofPlatform()
+                        .name("grpc-pool-health-check-job")
+                        .daemon()
+                        .factory()
+            );
+
+    private final ScheduledFuture<?> healthCheckJob;
 
     public GrpcSingleNodeChannelPool(ServiceRegistryIf serviceRegistryIf,
                                      ServiceKey<? extends PartitionTraits.Unicast> serviceKey,
@@ -46,10 +68,25 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
 
         this.serviceRegistryIf = serviceRegistryIf;
         this.channelConstructor = channelConstructor;
-        this.stubConstructor = stubConstructor;
+        this.defaultStubConstructor = stubConstructor;
 
         serviceRegistryIf.registerMonitor(this);
 
+        onChange();
+
+        healthCheckJob = connectionPoolScheduledJobExecutor.scheduleAtFixedRate(
+                this::checkConnectionHealth, 300, 30, TimeUnit.SECONDS);
+    }
+
+    private synchronized void checkConnectionHealth() {
+
+        for (var channel : channels.values()) {
+            if (!channel.hasRecentError()) {
+                return;
+            }
+        }
+
+        logger.warn(grpcMarker, "Connection pool {} is degraded, attempting to repair", serviceKey);
         onChange();
     }
 
@@ -74,6 +111,7 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
             }
         }
 
+        notifyAll();
     }
 
     // Mostly for testing
@@ -81,52 +119,81 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
         for (var channel : channels.values()) {
             channel.closeHard();
         }
+        healthCheckJob.cancel(true);
         channels.clear();
     }
 
-    private class ConnectionHolder implements Comparable<ConnectionHolder> {
+    public class ConnectionHolder implements Comparable<ConnectionHolder> {
         private final AtomicReference<ManagedChannel> channel = new AtomicReference<>();
         private final InstanceAddress address;
-        private volatile long lastError = Long.MIN_VALUE;
-        private volatile long lastUsed = Long.MAX_VALUE;
+
+        private volatile long lastError = System.nanoTime() - Duration.ofMinutes(10).toNanos();
+        private volatile long lastUsed = System.nanoTime();
+        private volatile boolean closed = false;
 
         ConnectionHolder(InstanceAddress address) {
             this.address = address;
         }
 
+        @Nullable
         public ManagedChannel get() {
-            var value = channel.get();
+            ManagedChannel value;
 
-            lastUsed = System.currentTimeMillis();
+            lastUsed = System.nanoTime();
 
-            if (value != null) {
+            if ((value = channel.get()) != null) {
+                // There is a small race condition in this branch, where value may be
+                // closed after we enter this branch, which is not possible to prevent.
+                //
+                // Caller will just have to deal with ManagedChannels on very rare instances
+                // being in weird states.
                 return value;
             }
+            else if (closed) {
+                return null;
+            }
+
+            logger.info(grpcMarker, "Creating channel for {} => {}", serviceKey, address);
 
             try {
-                logger.info(grpcMarker, "Creating channel for {} => {}", serviceKey, address);
                 value = channelConstructor.apply(address);
+
+                // Handle unlikely but possible race scenario where multiple callers
+                // compete to set 'channel'
                 if (channel.compareAndSet(null, value)) {
+                    if (closed) {
+                        // Even more unlikely A->B->A case
+                        value.shutdown();
+                        return null;
+                    }
                     return value;
                 }
-                else {
+                else { // Close the superfluous channel we just created
                     value.shutdown();
                     return channel.get();
                 }
             }
             catch (Exception e) {
+                // ensure we don't retry this channel immediately
+                lastError = System.nanoTime();
+
                 logger.error(grpcMarker, "Failed to get channel for " + address, e);
                 return null;
             }
         }
 
-        public void close() {
+        void close() {
+            closed = true;
+
             ManagedChannel mc = channel.getAndSet(null);
             if (mc != null) {
                 mc.shutdown();
             }
         }
-        public void closeHard() {
+
+        void closeHard() {
+            closed = true;
+
             ManagedChannel mc = channel.getAndSet(null);
             if (mc != null) {
                 mc.shutdownNow();
@@ -148,24 +215,37 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
             return Objects.hash(address);
         }
 
-        /** Keep track of the last time this channel errored, up til 5 minutes */
+        /** Keep track of the last time this channel errored, up til 1 minute */
         private boolean hasRecentError() {
-            return System.currentTimeMillis() < lastError + Duration.ofMinutes(5).toMillis();
+            return hasErrorSince(Duration.ofMinutes(1));
         }
 
-        void flagError() {
-            lastError = System.currentTimeMillis();
+        public boolean hasErrorSince(Duration duration) {
+            return System.nanoTime() - lastError <  duration.toNanos();
+        }
+
+        public void flagError() {
+            lastError = System.nanoTime();
+        }
+
+        public boolean hasConnection() {
+            return channel.get() != null && !closed;
         }
 
         @Override
         public int compareTo(@NotNull GrpcSingleNodeChannelPool<STUB>.ConnectionHolder o) {
-            // If one has recently errored and the other has not, the one that has not errored is preferred
+
             int diff = Boolean.compare(hasRecentError(), o.hasRecentError());
-            if (diff != 0) return diff;
+            if (diff != 0) return diff; // prefer false
+
+            diff = Boolean.compare(hasConnection(), o.hasConnection());
+            if (diff != 0) return -diff; // prefer true
+
 
             // If no error has been recorded (or both have recent errors), round-robin between the options
             return Long.compare(lastUsed, o.lastUsed);
         }
+
     }
 
 
@@ -184,23 +264,45 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
             if (timeLeft <= 0) return false;
             this.wait(timeLeft);
         }
+
         return hasChannel();
     }
 
     private <T, I> T call(BiFunction<STUB, I, T> call, I arg) throws RuntimeException {
+        return call(defaultStubConstructor, call, arg);
+    }
+
+
+    public List<ConnectionHolder> getConnectionHolders() {
+        return channels.values().stream().sorted().toList();
+    }
+
+    public <T, I> T call(Function<ManagedChannel, STUB> stubConstructor,
+                          BiFunction<STUB, I, T> call,
+                          I arg) throws RuntimeException {
         final List<Exception> exceptions = new ArrayList<>();
-        final List<ConnectionHolder> connectionHolders = new ArrayList<>(channels.values());
+        final List<ConnectionHolder> connectionHolders = getConnectionHolders();
 
-        // Sorting the channel list will give us a round-robin distribution of calls,
-        // while preferring channels that have not errored recently
-        Collections.sort(connectionHolders);
+        final String serviceKeyStr = serviceKey.toString();
 
-        for (var channel : connectionHolders) {
+        for (var holder : connectionHolders) {
             try {
-                return call.apply(stubConstructor.apply(channel.get()), arg);
+                ManagedChannel channel = holder.get();
+                if (null == channel)
+                    continue;
+
+                var ret = call.apply(stubConstructor.apply(channel), arg);
+
+                requestCounter.labelValues(serviceKeyStr).inc();
+
+                return ret;
             }
             catch (Exception e) {
-                channel.flagError();
+                if (shouldFlagAsError(e)) {
+                    holder.flagError();
+                }
+
+                errorCounter.labelValues(serviceKeyStr).inc();
 
                 exceptions.add(e);
             }
@@ -216,6 +318,66 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
         }
 
         throw new ServiceNotAvailableException(serviceKey);
+    }
+
+    private <T, I> List<Future<T>> broadcast(BiFunction<STUB, I, T> call, I arg) throws RuntimeException {
+        final List<Exception> exceptions = new ArrayList<>();
+        List<Future<T>> ret = new ArrayList<>();
+
+        String serviceKeyStr = serviceKey.toString();
+        for (var holder : channels.values()) {
+            try {
+                ManagedChannel channel = holder.get();
+                if (channel == null)
+                    continue;
+
+                ret.add(CompletableFuture.completedFuture(call.apply(defaultStubConstructor.apply(channel), arg)));
+                requestCounter.labelValues(serviceKeyStr).inc();
+            }
+            catch (Exception e) {
+                ret.add(CompletableFuture.failedFuture(e));
+
+                if (shouldFlagAsError(e)) {
+                    holder.flagError();
+                }
+
+                exceptions.add(e);
+            }
+        }
+
+        for (var e : exceptions) {
+            if (e instanceof StatusRuntimeException se) {
+                throw se; // Re-throw SRE as-is
+            }
+
+            errorCounter.labelValues(serviceKey.toString()).inc();
+
+            // If there are other exceptions, log them
+            logger.error(grpcMarker, "Failed to call service {}", serviceKey, e);
+        }
+
+        return ret;
+    }
+
+    private boolean shouldFlagAsError(Exception e) {
+
+        // "other exception"
+
+        if (!(e instanceof StatusRuntimeException sre))
+            return true;
+
+        // GRPC exception, we flag as bad if the status code indicates a problem
+        // with the connection or the state of the downstream service
+
+        return switch (sre.getStatus().getCode()) {
+            case UNAVAILABLE,
+                 DEADLINE_EXCEEDED,
+                 INTERNAL,
+                 UNKNOWN,
+                 DATA_LOSS,
+                 UNAUTHENTICATED -> true;
+            default -> false;
+        };
     }
 
     /** Create a call for the given method on the given node.
@@ -240,7 +402,25 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
         public CallBuilderAsync<T, I> async(Executor executor) {
             return new CallBuilderAsync<>(executor, method);
         }
+
+        /** Send message to all partitions */
+        public CallBuilderBroadcast<T, I> broadcast() {
+            return new CallBuilderBroadcast<>(method);
+        }
     }
+
+    public class CallBuilderBroadcast<T, I> {
+        private final BiFunction<STUB, I, T> method;
+        private CallBuilderBroadcast(BiFunction<STUB, I, T> method) {
+            this.method = method;
+        }
+
+        /** Execute the call in a blocking manner */
+        public List<Future<T>> run(I arg) {
+            return broadcast(method, arg);
+        }
+    }
+
     public class CallBuilderAsync<T, I> {
         private final Executor executor;
         private final BiFunction<STUB, I, T> method;

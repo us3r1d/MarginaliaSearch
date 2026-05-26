@@ -177,8 +177,10 @@ class HttpFetcherImplFetchTest {
 
 
     @Test
-    public void testFoo() {
-        fetcher.fetchSitemapUrls("https://www.marginalia.nu/sitemap.xml", new CrawlDelayTimer(100));
+    public void testFetchSitemap() {
+        List<EdgeUrl> urls = fetcher.fetchSitemapUrls("https://www.marginalia.nu/sitemap.xml", new CrawlDelayTimer(100));
+
+        Assertions.assertFalse(urls.isEmpty(), "Sitemap should contain URLs");
     }
 
     @Test
@@ -372,8 +374,6 @@ class HttpFetcherImplFetchTest {
 
     private List<WarcRecord> getWarcRecords() throws IOException {
         List<WarcRecord> records = new ArrayList<>();
-
-        System.out.println(Files.readString(warcFile));
 
         try (var reader = new WarcReader(warcFile)) {
             WarcXResponseReference.register(reader);

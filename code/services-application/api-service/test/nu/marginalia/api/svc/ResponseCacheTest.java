@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
+import java.util.EnumSet;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -15,17 +16,25 @@ class ResponseCacheTest {
             "keyA",
             "Public Domain",
             "Steven",
-            0
+            0,
+            0,
+            0,
+            0,
+            EnumSet.noneOf(ApiLicenseOptions.class)
     );
     ApiLicense licenseB = new ApiLicense(
             "keyB",
             "Public Domain",
             "Jeff",
-            0
+            0,
+            15,
+            0,
+            0,
+            EnumSet.noneOf(ApiLicenseOptions.class)
     );
 
-    ApiSearchResults resultsA = new ApiSearchResults("x", "y", Collections.emptyList());
-    ApiSearchResults resultsB = new ApiSearchResults("x", "y", Collections.emptyList());
+    ApiSearchResults resultsA = new ApiSearchResults("x", "y", 1,1, Collections.emptyList());
+    ApiSearchResults resultsB = new ApiSearchResults("x", "y", 1, 1, Collections.emptyList());
 
     @BeforeEach
     public void setUp() {

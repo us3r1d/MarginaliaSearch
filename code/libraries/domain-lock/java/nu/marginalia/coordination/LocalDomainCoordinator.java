@@ -4,6 +4,9 @@ import com.google.inject.Singleton;
 import nu.marginalia.model.EdgeDomain;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -12,26 +15,42 @@ import java.util.concurrent.TimeUnit;
 
 @Singleton
 public class LocalDomainCoordinator implements DomainCoordinator {
-    // The locks are stored in a map, with the domain name as the key.  This map will grow
+    // The data is stored in a map, with the domain name as the key.  This map will grow
     // relatively big, but should be manageable since the number of domains is limited to
-    // a few hundred thousand typically.
+    // a few hundred thousand typically
+
     private final Map<String, Semaphore> locks = new ConcurrentHashMap<>();
+    private final Map<String, Instant> accessTimes = new ConcurrentHashMap<>();
+
+    private final Duration requestCadence = Duration.ofSeconds(1);
 
     /** Returns a lock object corresponding to the given domain.  The object is returned as-is,
      * and may be held by another thread.  The caller is responsible for locking and  releasing the lock.
      */
     public DomainLock lockDomain(EdgeDomain domain) throws InterruptedException {
-        var sem = locks.computeIfAbsent(domain.topDomain.toLowerCase(), this::defaultPermits);
+        String key = domain.topDomain.toLowerCase();
+
+        var sem = locks.computeIfAbsent(key, this::defaultPermits);
 
         sem.acquire();
 
-        return new LocalDomainLock(sem);
+        Thread.sleep(timeUntilNextRequest(key));
+
+        return new LocalDomainLock(key, sem);
     }
 
     public Optional<DomainLock> tryLockDomain(EdgeDomain domain) {
-        var sem = locks.computeIfAbsent(domain.topDomain.toLowerCase(), this::defaultPermits);
+        String key = domain.topDomain.toLowerCase();
+
+        var sem = locks.computeIfAbsent(key, this::defaultPermits);
         if (sem.tryAcquire(1)) {
-            return Optional.of(new LocalDomainLock(sem));
+
+            if (timeUntilNextRequest(key).isPositive()) {
+                sem.release();
+                return Optional.empty();
+            }
+
+            return Optional.of(new LocalDomainLock(key, sem));
         }
         else {
             // We don't have a lock, so we return an empty optional
@@ -41,9 +60,24 @@ public class LocalDomainCoordinator implements DomainCoordinator {
 
 
     public Optional<DomainLock> tryLockDomain(EdgeDomain domain, Duration timeout) throws InterruptedException {
-        var sem = locks.computeIfAbsent(domain.topDomain.toLowerCase(), this::defaultPermits);
+        String key = domain.topDomain.toLowerCase();
+
+        Instant cutoffTime = Instant.now().plus(timeout);
+
+        var sem = locks.computeIfAbsent(key, this::defaultPermits);
         if (sem.tryAcquire(1, timeout.toMillis(), TimeUnit.MILLISECONDS)) {
-            return Optional.of(new LocalDomainLock(sem));
+
+            Duration timeUntilNextRequest = timeUntilNextRequest(key);
+            Duration timeRemaining = Duration.between(Instant.now(), cutoffTime);
+
+            if (timeRemaining.isNegative() || timeRemaining.compareTo(timeUntilNextRequest) < 0) {
+                sem.release();
+                return Optional.empty();
+            }
+
+            Thread.sleep(timeUntilNextRequest);
+
+            return Optional.of(new LocalDomainLock(key, sem));
         }
         else {
             // We don't have a lock, so we return an empty optional
@@ -52,7 +86,27 @@ public class LocalDomainCoordinator implements DomainCoordinator {
     }
 
     private Semaphore defaultPermits(String topDomain) {
-        return new Semaphore(DefaultDomainPermits.defaultPermits(topDomain));
+        return new Semaphore(
+                switch (topDomain) {
+                    case "wordpress.com" -> 16;
+                    case "blogspot.com",
+                         "tumblr.com",
+                         "neocities.org",
+                         "github.io" -> 8;
+                    case "substack.com" -> 1;
+                    default -> 2;
+                }
+        );
+    }
+
+    private Instant nextPermissibleRequestTime(String key) {
+        return accessTimes
+                .getOrDefault(key, Instant.EPOCH)
+                .plus(requestCadence);
+    }
+
+    private Duration timeUntilNextRequest(String key) {
+        return Duration.between(Instant.now(), nextPermissibleRequestTime(key));
     }
 
     /** Returns true if the domain is lockable, i.e. if it is not already locked by another thread.
@@ -67,15 +121,18 @@ public class LocalDomainCoordinator implements DomainCoordinator {
             return sem.availablePermits() > 0;
     }
 
-    public static class LocalDomainLock implements DomainLock {
+    public class LocalDomainLock implements DomainLock {
+        private final String key;
         private final Semaphore semaphore;
 
-        LocalDomainLock(Semaphore semaphore) {
+        LocalDomainLock(String key, Semaphore semaphore) {
+            this.key = key;
             this.semaphore = semaphore;
         }
 
         @Override
         public void close() {
+            accessTimes.put(key, Instant.now()); // order is important here
             semaphore.release();
         }
     }

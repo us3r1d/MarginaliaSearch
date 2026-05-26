@@ -64,12 +64,14 @@ services:
     container_name: "index-service-1"
     security_opt:
       - seccomp:unconfined
+  restart: always
   index-service-2:
     <<: *partition-2
     image: "marginalia/index-service"
     container_name: "index-service-2"
     security_opt:
       - seccomp:unconfined
+    restart: always
   query-service:
     <<: *service
     image: "marginalia/query-service"
@@ -93,6 +95,27 @@ services:
     - "traefik.enable=true"
     - "traefik.http.routers.control-service.rule=PathPrefix(`/`)"
     - "traefik.http.routers.control-service.entrypoints=control"
+#  Headless browser for DOM sampling, screenshots etc.
+#
+#
+#  headless:
+#    image: "marginalia-headless"
+#    container_name: "headless"
+#    restart: always
+#    env_file:
+#    - "env/headless.env"
+#    networks:
+#    - wmsa
+#
+#   To use, update `env/headless.env` and add a line like
+#
+#   TOKEN=my-secret-password
+#
+#   and then update `conf/properties/system.properties` and add
+#
+#    live-capture.headless-uri=http://headless:8080/
+#    live-capture.headless-token=my-secret-password
+#    live-capture.headless-sample-threads=4
   mariadb:
     image: "mariadb:lts"
     container_name: "mariadb"
@@ -119,7 +142,7 @@ services:
     networks:
       - wmsa
   traefik:
-    image: "traefik:v2.10"
+    image: "traefik:v2.11"
     container_name: "traefik"
     command:
       #- "--log.level=DEBUG"

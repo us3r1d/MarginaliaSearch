@@ -2,10 +2,13 @@ package nu.marginalia.search;
 
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
+import it.unimi.dsi.fastutil.ints.IntList;
 import nu.marginalia.WebsiteUrl;
 import nu.marginalia.api.math.MathClient;
 import nu.marginalia.api.searchquery.QueryClient;
+import nu.marginalia.api.searchquery.QueryFilterSpec;
 import nu.marginalia.api.searchquery.RpcQueryLimits;
+import nu.marginalia.api.searchquery.model.query.NsfwFilterTier;
 import nu.marginalia.api.searchquery.model.query.QueryResponse;
 import nu.marginalia.api.searchquery.model.results.DecoratedSearchResultItem;
 import nu.marginalia.bbpc.BrailleBlockPunchCards;
@@ -29,10 +32,7 @@ import org.slf4j.MarkerFactory;
 
 import javax.annotation.Nullable;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -50,17 +50,26 @@ public class SearchOperator {
     private final MathClient mathClient;
     private final DbDomainQueries domainQueries;
     private final QueryClient queryClient;
-    private final SearchQueryParamFactory paramFactory;
     private final WebsiteUrl websiteUrl;
     private final SearchUnitConversionService searchUnitConversionService;
     private final SearchQueryCountService searchVisitorCount;
 
+    static final RpcQueryLimits shallowLimit = RpcQueryLimits.newBuilder()
+            .setResultsTotal(100)
+            .setResultsByDomain(100)
+            .setTimeoutMs(100)
+            .build();
+
+    static final RpcQueryLimits defaultLimits = RpcQueryLimits.newBuilder()
+            .setResultsTotal(100)
+            .setResultsByDomain(5)
+            .setTimeoutMs(250)
+            .build();
 
     @Inject
     public SearchOperator(MathClient mathClient,
                           DbDomainQueries domainQueries,
                           QueryClient queryClient,
-                          SearchQueryParamFactory paramFactory,
                           WebsiteUrl websiteUrl,
                           SearchUnitConversionService searchUnitConversionService,
                           SearchQueryCountService searchVisitorCount
@@ -70,7 +79,6 @@ public class SearchOperator {
         this.mathClient = mathClient;
         this.domainQueries = domainQueries;
         this.queryClient = queryClient;
-        this.paramFactory = paramFactory;
         this.websiteUrl = websiteUrl;
         this.searchUnitConversionService = searchUnitConversionService;
         this.searchVisitorCount = searchVisitorCount;
@@ -80,23 +88,46 @@ public class SearchOperator {
                                         int domainId,
                                         int count) throws TimeoutException {
 
-        var queryParams = paramFactory.forSiteSearch(domain, domainId, count);
-        var queryResponse = queryClient.search(queryParams);
+        var queryResponse = queryClient.search(
+                QueryFilterSpec.FilterAdHoc.builder().domainsInclude(IntList.of(domainId)).build(),
+                "site:"+domain,
+                "en",
+                NsfwFilterTier.DANGER,
+                RpcQueryLimits.newBuilder()
+                        .setResultsTotal(count)
+                        .setResultsByDomain(count)
+                        .setTimeoutMs(100)
+                        .build(),
+                1
+        );
+
 
         return getResultsFromQuery(queryResponse);
     }
 
     public List<UrlDetails> doBacklinkSearch(String domain) throws TimeoutException {
 
-        var queryParams = paramFactory.forBacklinkSearch(domain);
-        var queryResponse = queryClient.search(queryParams);
+        var queryResponse = queryClient.search(
+                new QueryFilterSpec.NoFilter(),
+                "links:"+domain,
+                "en",
+                NsfwFilterTier.DANGER,
+                shallowLimit,
+                1
+        );
 
         return getResultsFromQuery(queryResponse);
     }
 
     public List<UrlDetails> doLinkSearch(String source, String dest) throws TimeoutException {
-        var queryParams = paramFactory.forLinkSearch(source, dest);
-        var queryResponse = queryClient.search(queryParams);
+        var queryResponse = queryClient.search(
+                new QueryFilterSpec.NoFilter(),
+                "site:" + source + " links:" + dest,
+                "en",
+                NsfwFilterTier.DANGER,
+                shallowLimit,
+                1
+        );
 
         return getResultsFromQuery(queryResponse);
     }
@@ -107,10 +138,21 @@ public class SearchOperator {
 
         Future<String> eval = searchUnitConversionService.tryEval(userParams.query());
 
-        // Perform the regular search
+        // HACK: Allows language selection via query on legacy
+        final Map.Entry<String, String> queryAndLang = extractLangFromQuery(userParams.query());
+        final String query = queryAndLang.getKey();
+        final String lang = queryAndLang.getValue();
 
-        var queryParams = paramFactory.forRegularSearch(userParams);
-        QueryResponse queryResponse = queryClient.search(queryParams);
+        // Perform the regular search
+        QueryResponse queryResponse = queryClient.search(
+                userParams.asFilterSpec(),
+                query,
+                lang,
+                userParams.filterTier(),
+                defaultLimits,
+                userParams.page()
+        );
+
         var queryResults = getResultsFromQuery(queryResponse);
 
         // Cluster the results based on the query response
@@ -154,9 +196,30 @@ public class SearchOperator {
                 .build();
     }
 
+    private Map.Entry<String, String> extractLangFromQuery(String query) {
+        if (!query.contains("lang:")) {
+            return Map.entry(query, "en");
+        }
+
+        String lang = "en";
+        StringJoiner queryParts = new StringJoiner(" ");
+
+        String[] parts = query.split("\s+");
+        for (String part : parts) {
+            if (part.startsWith("lang:") && part.length() == 7) {
+                lang = part.substring(5);
+            }
+            else {
+                queryParts.add(part);
+            }
+        }
+
+        return Map.entry(queryParts.toString(), lang);
+    }
+
 
     public List<UrlDetails> getResultsFromQuery(QueryResponse queryResponse) {
-        final RpcQueryLimits limits = queryResponse.specs().queryLimits;
+        final RpcQueryLimits limits = queryResponse.limits();
         final UrlDeduplicator deduplicator = new UrlDeduplicator(limits.getResultsByDomain());
 
         // Update the query count (this is what you see on the front page)

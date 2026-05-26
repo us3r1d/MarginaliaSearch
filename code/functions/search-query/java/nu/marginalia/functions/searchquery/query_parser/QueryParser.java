@@ -4,7 +4,7 @@ import nu.marginalia.api.searchquery.model.query.SpecificationLimit;
 import nu.marginalia.functions.searchquery.query_parser.token.QueryToken;
 import nu.marginalia.language.WordPatterns;
 import nu.marginalia.language.model.LanguageDefinition;
-import nu.marginalia.util.transform_list.TransformList;
+import nu.marginalia.functions.searchquery.transform_list.TransformList;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -224,6 +224,8 @@ public class QueryParser {
             entity.replace(new QueryToken.NearTerm(str.substring(5)));
         } else if (str.startsWith("lang:")) {
             entity.replace(new QueryToken.LangTerm(str.substring(5), str));
+        } else if (str.startsWith("set:")) {
+            entity.replace(new QueryToken.SetTerm(str.substring(4), str));
         } else if (str.startsWith("year") && str.matches("year[=><]\\d{4}")) {
             var limit = parseSpecificationLimit(str.substring(4));
             entity.replace(new QueryToken.YearTerm(limit, str));

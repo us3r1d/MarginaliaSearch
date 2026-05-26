@@ -19,6 +19,7 @@ jte {
     targetDirectory = file('build/classes/jte-precompiled').toPath()
     generate()
 }
+
 java {
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(rootProject.ext.jvmVersion))
@@ -37,11 +38,13 @@ dependencies {
     implementation project(':code:libraries:easy-lsh')
     implementation project(':code:functions:language-processing')
     implementation project(':code:libraries:braille-block-punch-cards')
+    implementation project(':code:libraries:scrape-stopper')
 
-    implementation project(':code:functions:live-capture:api')
+    implementation project(':code:index:live-capture:api')
     implementation project(':code:functions:math:api')
     implementation project(':code:functions:favicon:api')
     implementation project(':code:functions:domain-info:api')
+    implementation project(':code:functions:search-query')
     implementation project(':code:functions:search-query:api')
     implementation project(':code:processes:converting-process:ft-dom-classifier')
 
@@ -83,10 +86,13 @@ dependencies {
     testImplementation libs.bundles.junit
     testImplementation libs.mockito
 
-    testImplementation platform('org.testcontainers:testcontainers-bom:1.17.4')
+    testImplementation platform('org.testcontainers:testcontainers-bom:1.21.4') {
+        exclude group: 'org.apache.commons'
+    }
+    testImplementation libs.commons.compress
     testImplementation libs.commons.codec
-    testImplementation 'org.testcontainers:mariadb:1.17.4'
-    testImplementation 'org.testcontainers:junit-jupiter:1.17.4'
+    testImplementation 'org.testcontainers:mariadb:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
     testImplementation project(':code:libraries:test-helpers')
 
     testImplementation dependencies.create(libs.spark.get())

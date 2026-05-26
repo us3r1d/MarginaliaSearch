@@ -35,19 +35,24 @@ dependencies {
     implementation project(':code:execution:api')
     implementation project(':code:functions:favicon')
     implementation project(':code:functions:favicon:api')
+    implementation project(':code:index:live-capture')
+    implementation project(':code:index:live-capture:api')
+
+    implementation project(':code:libraries:domain-lock')
 
     implementation project(':code:index')
     implementation project(':code:functions:link-graph:partition')
     implementation project(':code:functions:link-graph:api')
     implementation project(':code:functions:search-query:api')
-    implementation project(':code:functions:nsfw-domain-filter')
+    implementation project(':code:functions:nsfw-filter')
     implementation project(':code:index:api')
 
     testImplementation project(path: ':code:services-core:control-service')
 
     implementation libs.bundles.slf4j
-
+    implementation libs.bundles.jetty
     implementation libs.prometheus
+    implementation libs.bundles.jooby
     implementation libs.notnull
     implementation libs.guava
     implementation dependencies.create(libs.guice.get()) {
@@ -56,10 +61,7 @@ dependencies {
     implementation libs.bundles.httpcomponents
     implementation libs.roaringbitmap
     implementation libs.snakeyaml
-    implementation dependencies.create(libs.spark.get()) {
-        exclude group: 'org.eclipse.jetty'
-    }
-    implementation libs.bundles.jetty
+
     implementation libs.opencsv
     implementation libs.trove
     implementation libs.fastutil

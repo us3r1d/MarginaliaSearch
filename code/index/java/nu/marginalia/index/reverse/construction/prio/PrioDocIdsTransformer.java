@@ -23,12 +23,13 @@ public class PrioDocIdsTransformer implements LongArrayTransformations.LongIOTra
     private final ByteBuffer writeBuffer = ByteBuffer.allocate(65536);
 
     long startL = 0;
-    long writeOffsetB = 0;
+    long writeOffsetB;
 
     public PrioDocIdsTransformer(FileChannel writeChannel,
-                                 FileChannel readChannel) {
+                                 FileChannel readChannel) throws IOException {
         this.writeChannel = writeChannel;
         this.readChannel = readChannel;
+        this.writeOffsetB = writeChannel.size();
     }
 
     @Override
@@ -146,21 +147,30 @@ public class PrioDocIdsTransformer implements LongArrayTransformations.LongIOTra
 
         readChannel.position(startL * 8);
 
+        long prev = 0;
+
         while (toBeRead > 0) {
             readBuffer.clear();
             readBuffer.limit(Math.min(readBuffer.capacity(), toBeRead));
-            toBeRead -= readChannel.read(readBuffer);
+            int rb = readChannel.read(readBuffer);
+            if (rb < 0) throw new IllegalStateException("Unexpected end of file");
+
+            toBeRead -= rb;
             readBuffer.flip();
 
             if (readBuffer.limit() == 0)
                 continue;
 
-            int count = 1;
-            long prev = readBuffer.getLong();
+            int count = 0;
+
+            if (distinctEntries == 0) {
+                count ++;
+                prev = readBuffer.getLong();
+            }
+
             long current;
 
             while (readBuffer.hasRemaining()) {
-
                 if ((current = readBuffer.getLong()) != prev)
                     count++;
                 prev = current;

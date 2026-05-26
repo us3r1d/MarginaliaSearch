@@ -45,12 +45,13 @@ import org.jsoup.nodes.Document;
 import org.jsoup.parser.Parser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.Marker;
-import org.slf4j.MarkerFactory;
 
+import javax.annotation.Nullable;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.util.zip.GZIPInputStream;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.URISyntaxException;
@@ -59,6 +60,9 @@ import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -68,7 +72,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Singleton
 public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
 
-    private final Logger logger = LoggerFactory.getLogger(getClass());
+    private static final Logger logger = LoggerFactory.getLogger(HttpFetcherImpl.class);
     private final String userAgentString;
     private final String userAgentIdentifier;
 
@@ -77,7 +81,9 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
 
     private static final SimpleRobotRulesParser robotsParser = new SimpleRobotRulesParser();
     private static final ContentTypeLogic contentTypeLogic = new ContentTypeLogic();
-    private final Marker crawlerAuditMarker = MarkerFactory.getMarker("CRAWLER");
+
+    @Nullable // in tests
+    private final CrawlerAuditLog auditLog;
 
     private final LinkParser linkParser = new LinkParser();
     @Override
@@ -100,7 +106,7 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
                 .build();
 
         PoolingHttpClientConnectionManagerBuilder connectionManagerBuilder = PoolingHttpClientConnectionManagerBuilder.create()
-                .setMaxConnPerRoute(2)
+                .setMaxConnPerRoute(10)
                 .setMaxConnTotal(5000)
                 .setDefaultConnectionConfig(connectionConfig)
                 .setTlsSocketStrategy(new DefaultClientTlsStrategy(SSLContext.getDefault()));
@@ -165,6 +171,7 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
                     }
                 })
                 .disableRedirectHandling()
+                .disableContentCompression()
                 .setDefaultRequestConfig(defaultRequestConfig)
                 .build();
     }
@@ -180,7 +187,7 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
     }
 
     @Inject
-    public HttpFetcherImpl(UserAgent userAgent)
+    public HttpFetcherImpl(UserAgent userAgent, CrawlerAuditLog auditLog)
     {
         this.proxyManager = new SocksProxyManager(new SocksProxyConfiguration());
         try {
@@ -192,6 +199,11 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
         }
         this.userAgentString = userAgent.uaString();
         this.userAgentIdentifier = userAgent.uaIdentifier();
+        this.auditLog = auditLog;
+    }
+
+    public HttpFetcherImpl(UserAgent userAgent) {
+        this(userAgent, null);
     }
 
     public HttpFetcherImpl(String userAgent) {
@@ -205,6 +217,7 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
         }
         this.userAgentString = userAgent;
         this.userAgentIdentifier = userAgent;
+        this.auditLog = null;
     }
 
     // Not necessary in prod, but useful in test
@@ -250,10 +263,10 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
 
             try {
                 var result = SendLock.wrapSend(client, request, response -> {
-                    EntityUtils.consume(response.getEntity());
+                    EntityUtils.consumeQuietly(response.getEntity());
 
                     return switch (response.getCode()) {
-                        case 200 -> new DomainProbeResult.Ok(url);
+                        case 200, 206 -> new DomainProbeResult.Ok(url);
                         case 405 -> {
                             if (!tryGet.get()) {
                                 tryGet.set(true);
@@ -302,7 +315,7 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
                 return new DomainProbeResult.Error(CrawlerDomainStatus.ERROR, "Timeout during domain probe");
             }
             catch (Exception ex) {
-                return new DomainProbeResult.Error(CrawlerDomainStatus.ERROR, "Error during domain probe");
+                return new DomainProbeResult.Error(CrawlerDomainStatus.ERROR, ex.getClass().getSimpleName() + " during domain probe");
             }
 
         }
@@ -336,7 +349,7 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
 
             return SendLock.wrapSend(client, head, (rsp) -> {
                 cookies.updateCookieStore(rsp);
-                EntityUtils.consume(rsp.getEntity());
+                EntityUtils.consumeQuietly(rsp.getEntity());
                 int statusCode = rsp.getCode();
 
                 // Handle redirects
@@ -405,30 +418,27 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
                 try {
                     var probeResult = probeContentType(url, cookies, timer, contentTags);
 
+                    if (auditLog != null)
+                        auditLog.logProbe(probeResult, url);
+
                     switch (probeResult) {
                         case HttpFetcher.ContentTypeProbeResult.NoOp():
-                            break; //
+                            break;
                         case HttpFetcher.ContentTypeProbeResult.Ok(EdgeUrl resolvedUrl):
-                            logger.info(crawlerAuditMarker, "Probe result OK for {}", url);
                             url = resolvedUrl; // If we were redirected while probing, use the final URL for fetching
                             break;
                         case ContentTypeProbeResult.BadContentType badContentType:
                             warcRecorder.flagAsFailedContentTypeProbe(url, badContentType.contentType(), badContentType.statusCode());
-                            logger.info(crawlerAuditMarker, "Probe result Bad ContenType ({}) for {}", badContentType.contentType(), url);
                             return new HttpFetchResult.ResultNone();
                         case ContentTypeProbeResult.BadContentType.Timeout(Exception ex):
-                            logger.info(crawlerAuditMarker, "Probe result Timeout for {}", url);
                             warcRecorder.flagAsTimeout(url);
                             return new HttpFetchResult.ResultException(ex);
                         case ContentTypeProbeResult.Exception(Exception ex):
-                            logger.info(crawlerAuditMarker, "Probe result Exception({}) for {}", ex.getClass().getSimpleName(), url);
                             warcRecorder.flagAsError(url, ex);
                             return new HttpFetchResult.ResultException(ex);
                         case ContentTypeProbeResult.HttpError httpError:
-                            logger.info(crawlerAuditMarker, "Probe result HTTP Error ({}) for {}", httpError.statusCode(), url);
                             return new HttpFetchResult.ResultException(new HttpException("HTTP status code " + httpError.statusCode() + ": " + httpError.message()));
                         case ContentTypeProbeResult.Redirect redirect:
-                            logger.info(crawlerAuditMarker, "Probe result redirect for {} -> {}", url, redirect.location());
                             return new HttpFetchResult.ResultRedirect(redirect.location());
                     }
                 } catch (Exception ex) {
@@ -458,20 +468,15 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
                     }
                 }
 
-                switch (result) {
-                    case HttpFetchResult.ResultOk ok -> logger.info(crawlerAuditMarker, "Fetch result OK {} for {} ({} ms)", ok.statusCode(), url, fetchDuration.toMillis());
-                    case HttpFetchResult.ResultRedirect redirect -> logger.info(crawlerAuditMarker, "Fetch result redirect: {}  for {}", redirect.url(), url);
-                    case HttpFetchResult.ResultNone none -> logger.info(crawlerAuditMarker, "Fetch result none for {}", url);
-                    case HttpFetchResult.ResultException ex -> logger.error(crawlerAuditMarker, "Fetch result exception for {}", url, ex.ex());
-                    case HttpFetchResult.Result304Raw raw -> logger.info(crawlerAuditMarker, "Fetch result: 304 Raw for {}", url);
-                    case HttpFetchResult.Result304ReplacedWithReference ref -> logger.info(crawlerAuditMarker, "Fetch result: 304 With reference for {}", url);
-                }
+                if (auditLog != null)
+                    auditLog.logFetch(result, url, fetchDuration);
 
                 return result;
             }
         }
         catch (Exception ex) {
-            logger.error(crawlerAuditMarker, "Fetch result exception for {}", url, ex);
+            if (auditLog != null)
+                auditLog.logFetch(new HttpFetchResult.ResultException(ex), url, Duration.ZERO);
 
             return new HttpFetchResult.ResultException(ex);
         }
@@ -554,11 +559,23 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
                         return new SitemapResult.SitemapError();
                     }
 
-                    Document parsedSitemap = Jsoup.parse(
-                            EntityUtils.toString(response.getEntity()),
-                            sitemapUrl.toString(),
-                            Parser.xmlParser()
-                    );
+                    InputStream entityStream = response.getEntity().getContent();
+
+                    Header contentEncoding = response.getFirstHeader("Content-Encoding");
+                    if (contentEncoding != null && "gzip".equalsIgnoreCase(contentEncoding.getValue())) {
+                        entityStream = new GZIPInputStream(entityStream);
+                    }
+
+                    Document parsedSitemap;
+
+                    try (var stream = entityStream) {
+                        parsedSitemap = Jsoup.parse(
+                                stream,
+                                null,
+                                sitemapUrl.toString(),
+                                Parser.xmlParser()
+                        );
+                    }
 
                     if (parsedSitemap.childrenSize() == 0) {
                         return new SitemapResult.SitemapError();
@@ -592,7 +609,7 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
                     };
                 }
                 finally {
-                    EntityUtils.consume(response.getEntity());
+                    EntityUtils.consumeQuietly(response.getEntity());
                 }
             });
         }
@@ -677,22 +694,43 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
 
         if (statusCode == 429) {
             // get the Retry-After header
-            String retryAfter = response.getFirstHeader("Retry-After").getValue();
-            if (retryAfter == null) {
+            Header header = response.getFirstHeader("Retry-After");
+
+            if (header == null) {
                 return TimeValue.ofSeconds(2);
             }
 
-            try {
-                int retryAfterTime = Integer.parseInt(retryAfter);
-                retryAfterTime = Math.clamp(retryAfterTime, 1, 5);
+            String retryAfter = header.getValue();
 
-                return TimeValue.ofSeconds(retryAfterTime);
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid Retry-After header: {}", retryAfter);
+            int retryAfterTime = parseRetryAfterSeconds(retryAfter);
+            if (retryAfterTime > 0) {
+                return TimeValue.ofSeconds(Math.clamp(retryAfterTime, 1, 10));
             }
         }
 
         return TimeValue.ofSeconds(2);
+    }
+
+    /** Parse a Retry-After header value, which can be either a number of seconds
+     *  or an HTTP-date (RFC 9110).  Returns the delay in seconds, or -1 on failure. */
+    static int parseRetryAfterSeconds(String retryAfter) {
+        if (retryAfter == null) return -1;
+
+        // Try as a number of seconds first
+        try {
+            return (int) Math.round(Double.parseDouble(retryAfter));
+        } catch (NumberFormatException ignored) {}
+
+        // Try as an HTTP-date; RFC 9110 mandates GMT but we also accept
+        // numeric offsets like +0000 since servers in the wild use both
+        try {
+            Instant target = ZonedDateTime.parse(retryAfter, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant();
+            long seconds = Duration.between(Instant.now(), target).toSeconds();
+            return (int) Math.max(seconds, 0);
+        } catch (DateTimeParseException ignored) {}
+
+        logger.warn("Invalid Retry-After header: {}", retryAfter);
+        return -1;
     }
 
     public static class RateLimitException extends Exception {
@@ -706,12 +744,11 @@ public class HttpFetcherImpl implements HttpFetcher, HttpRequestRetryStrategy {
         public StackTraceElement[] getStackTrace() { return new StackTraceElement[0]; }
 
         public Duration retryAfter() {
-            try {
-                return Duration.ofSeconds(Integer.parseInt(retryAfter));
+            int seconds = parseRetryAfterSeconds(retryAfter);
+            if (seconds > 0) {
+                return Duration.ofSeconds(seconds);
             }
-            catch (NumberFormatException ex) {
-                return Duration.ofSeconds(1);
-            }
+            return Duration.ofSeconds(1);
         }
     }
 

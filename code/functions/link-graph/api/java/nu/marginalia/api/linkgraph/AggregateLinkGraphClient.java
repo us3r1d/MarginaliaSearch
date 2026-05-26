@@ -2,7 +2,6 @@ package nu.marginalia.api.linkgraph;
 
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
-import nu.marginalia.api.linkgraph.LinkGraphApiGrpc;
 import nu.marginalia.service.client.GrpcChannelPoolFactory;
 import nu.marginalia.service.client.GrpcSingleNodeChannelPool;
 import nu.marginalia.service.discovery.property.ServiceKey;
@@ -15,26 +14,26 @@ import org.slf4j.LoggerFactory;
 import java.time.Duration;
 import java.util.List;
 
-import static nu.marginalia.api.linkgraph.LinkGraphApiGrpc.*;
+import static nu.marginalia.api.linkgraph.AggregateLinkGraphApiGrpc.*;
 
 @Singleton
 public class AggregateLinkGraphClient {
     private static final Logger logger = LoggerFactory.getLogger(AggregateLinkGraphClient.class);
 
-    private final GrpcSingleNodeChannelPool<LinkGraphApiBlockingStub> channelPool;
+    private final GrpcSingleNodeChannelPool<AggregateLinkGraphApiBlockingStub> channelPool;
 
     @Inject
     public AggregateLinkGraphClient(GrpcChannelPoolFactory factory) {
         this.channelPool = factory.createSingle(
-                ServiceKey.forGrpcApi(LinkGraphApiGrpc.class, ServicePartition.any()),
-                LinkGraphApiGrpc::newBlockingStub);
+                ServiceKey.forGrpcApi(AggregateLinkGraphApiGrpc.class, ServicePartition.any()),
+                AggregateLinkGraphApiGrpc::newBlockingStub);
     }
 
 
     public AllLinks getAllDomainLinks() {
         AllLinks links = new AllLinks();
 
-        channelPool.call(LinkGraphApiBlockingStub::getAllLinks)
+        channelPool.call(AggregateLinkGraphApiBlockingStub::getAllLinks)
                 .run(Empty.getDefaultInstance())
                 .forEachRemaining(pairs -> {
                     for (int i = 0; i < pairs.getDestIdsCount(); i++) {
@@ -47,7 +46,7 @@ public class AggregateLinkGraphClient {
 
     public List<Integer> getLinksToDomain(int domainId) {
         try {
-            return channelPool.call(LinkGraphApiBlockingStub::getLinksToDomain)
+            return channelPool.call(AggregateLinkGraphApiBlockingStub::getLinksToDomain)
                     .run(RpcDomainId.newBuilder().setDomainId(domainId).build())
                     .getDomainIdList()
                     .stream()
@@ -62,7 +61,7 @@ public class AggregateLinkGraphClient {
 
     public List<Integer> getLinksFromDomain(int domainId) {
         try {
-            return channelPool.call(LinkGraphApiBlockingStub::getLinksFromDomain)
+            return channelPool.call(AggregateLinkGraphApiBlockingStub::getLinksFromDomain)
                     .run(RpcDomainId.newBuilder().setDomainId(domainId).build())
                     .getDomainIdList()
                     .stream()
@@ -78,7 +77,7 @@ public class AggregateLinkGraphClient {
 
     public int countLinksToDomain(int domainId) {
         try {
-            return channelPool.call(LinkGraphApiBlockingStub::countLinksToDomain)
+            return channelPool.call(AggregateLinkGraphApiBlockingStub::countLinksToDomain)
                     .run(RpcDomainId.newBuilder().setDomainId(domainId).build())
                     .getIdCount();
 
@@ -91,7 +90,7 @@ public class AggregateLinkGraphClient {
 
     public int countLinksFromDomain(int domainId) {
         try {
-            return channelPool.call(LinkGraphApiBlockingStub::countLinksFromDomain)
+            return channelPool.call(AggregateLinkGraphApiBlockingStub::countLinksFromDomain)
                     .run(RpcDomainId.newBuilder().setDomainId(domainId).build())
                     .getIdCount();
         }

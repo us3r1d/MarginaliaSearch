@@ -1,6 +1,5 @@
 package nu.marginalia.io;
 
-import nu.marginalia.io.crawldata.format.ParquetSerializableCrawlDataStream;
 import nu.marginalia.io.crawldata.format.SlopSerializableCrawlDataStream;
 import nu.marginalia.model.crawldata.CrawledDocument;
 import nu.marginalia.model.crawldata.CrawledDomain;
@@ -10,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -40,22 +40,16 @@ public interface SerializableCrawlDataStream extends AutoCloseable {
     /** An iterator-like access to domain data  This must be closed otherwise it will leak off-heap memory! */
     static SerializableCrawlDataStream openDataStream(Path fullPath) throws IOException
     {
+        if (!Files.exists(fullPath)) {
+            logger.error("Missing file: {}", fullPath);
+            return SerializableCrawlDataStream.empty();
+        }
 
         String fileName = fullPath.getFileName().toString();
 
         if (fileName.endsWith(".slop.zip")) {
             try {
                 return new SlopSerializableCrawlDataStream(fullPath);
-            } catch (Exception ex) {
-                logger.error("Error reading domain data from " + fullPath, ex);
-                return SerializableCrawlDataStream.empty();
-            }
-        }
-
-        else if (fileName.endsWith(".parquet")) {
-            logger.error("Opening deprecated parquet-style crawl data stream", new Exception());
-            try {
-                return new ParquetSerializableCrawlDataStream(fullPath);
             } catch (Exception ex) {
                 logger.error("Error reading domain data from " + fullPath, ex);
                 return SerializableCrawlDataStream.empty();
@@ -71,10 +65,7 @@ public interface SerializableCrawlDataStream extends AutoCloseable {
      * or if the file is seemed too small to bother */
     static int getSizeHint(Path fullPath) {
         String fileName = fullPath.getFileName().toString();
-        if (fileName.endsWith(".parquet")) {
-            return ParquetSerializableCrawlDataStream.sizeHint(fullPath);
-        }
-        else if (fileName.endsWith(".slop.zip")) {
+        if (fileName.endsWith(".slop.zip")) {
             return SlopSerializableCrawlDataStream.sizeHint(fullPath);
         }
         else {

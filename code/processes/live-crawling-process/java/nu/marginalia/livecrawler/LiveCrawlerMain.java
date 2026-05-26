@@ -5,16 +5,17 @@ import com.google.inject.Guice;
 import com.google.inject.Inject;
 import com.google.inject.Injector;
 import com.zaxxer.hikari.HikariDataSource;
+import nu.marginalia.IndexLocations;
 import nu.marginalia.WmsaHome;
-import nu.marginalia.api.feeds.FeedsClient;
 import nu.marginalia.converting.ConverterModule;
 import nu.marginalia.converting.processor.DomainProcessor;
 import nu.marginalia.converting.writer.ConverterBatchWriter;
-import nu.marginalia.coordination.DomainCoordinationModule;
 import nu.marginalia.coordination.DomainCoordinator;
 import nu.marginalia.db.DbDomainQueries;
 import nu.marginalia.db.DomainBlacklist;
+import nu.marginalia.index.journal.IndexJournal;
 import nu.marginalia.io.SerializableCrawlDataStream;
+import nu.marginalia.language.config.LanguageConfiguration;
 import nu.marginalia.livecrawler.io.HttpClientProvider;
 import nu.marginalia.loading.LoaderInputData;
 import nu.marginalia.loading.documents.DocumentLoaderService;
@@ -28,6 +29,7 @@ import nu.marginalia.process.ProcessConfiguration;
 import nu.marginalia.process.ProcessConfigurationModule;
 import nu.marginalia.process.ProcessMainClass;
 import nu.marginalia.process.control.ProcessHeartbeat;
+import nu.marginalia.rss.db.FeedDb;
 import nu.marginalia.service.module.DatabaseModule;
 import nu.marginalia.service.module.ServiceDiscoveryModule;
 import nu.marginalia.storage.FileStorageService;
@@ -38,13 +40,13 @@ import org.apache.hc.core5.io.CloseMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Security;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -56,7 +58,6 @@ public class LiveCrawlerMain extends ProcessMainClass {
     private static final Logger logger =
             LoggerFactory.getLogger(LiveCrawlerMain.class);
 
-    private final FeedsClient feedsClient;
     private final ProcessHeartbeat heartbeat;
     private final DbDomainQueries domainQueries;
     private final DomainBlacklist domainBlacklist;
@@ -64,12 +65,12 @@ public class LiveCrawlerMain extends ProcessMainClass {
     private final FileStorageService fileStorageService;
     private final KeywordLoaderService keywordLoaderService;
     private final DocumentLoaderService documentLoaderService;
+    private final LanguageConfiguration languageConfiguration;
     private final DomainCoordinator domainCoordinator;
     private final HikariDataSource dataSource;
 
     @Inject
-    public LiveCrawlerMain(FeedsClient feedsClient,
-                           Gson gson,
+    public LiveCrawlerMain(Gson gson,
                            ProcessConfiguration config,
                            ProcessHeartbeat heartbeat,
                            DbDomainQueries domainQueries,
@@ -79,13 +80,13 @@ public class LiveCrawlerMain extends ProcessMainClass {
                            FileStorageService fileStorageService,
                            KeywordLoaderService keywordLoaderService,
                            DocumentLoaderService documentLoaderService,
+                           LanguageConfiguration languageConfiguration,
                            DomainCoordinator domainCoordinator,
                            HikariDataSource dataSource)
             throws Exception
     {
         super(messageQueueFactory, config, gson, LIVE_CRAWLER_INBOX);
 
-        this.feedsClient = feedsClient;
         this.heartbeat = heartbeat;
         this.domainQueries = domainQueries;
         this.domainBlacklist = domainBlacklist;
@@ -93,6 +94,7 @@ public class LiveCrawlerMain extends ProcessMainClass {
         this.fileStorageService = fileStorageService;
         this.keywordLoaderService = keywordLoaderService;
         this.documentLoaderService = documentLoaderService;
+        this.languageConfiguration = languageConfiguration;
         this.domainCoordinator = domainCoordinator;
         this.dataSource = dataSource;
 
@@ -119,7 +121,6 @@ public class LiveCrawlerMain extends ProcessMainClass {
         try {
             Injector injector = Guice.createInjector(
                     new LiveCrawlerModule(),
-                    new DomainCoordinationModule(), // 2 hours lease timeout is enough for the live crawler
                     new ProcessConfigurationModule("crawler"),
                     new ConverterModule(),
                     new ServiceDiscoveryModule(),
@@ -179,12 +180,11 @@ public class LiveCrawlerMain extends ProcessMainClass {
             /* ------------------------------------------------ */
 
             processHeartbeat.progress(LiveCrawlState.FETCH_LINKS);
+            Map<String, List<String>> urlsPerDomain;
 
-            Map<String, List<String>> urlsPerDomain = new HashMap<>(10_000);
-            if (!feedsClient.waitReady(Duration.ofHours(1))) {
-                throw new RuntimeException("Feeds client never became ready, cannot proceed with live crawling");
+            try (var reader = FeedDb.createReader()) {
+                urlsPerDomain = reader.getLinksUpdatedSince(cutoff);
             }
-            feedsClient.getUpdatedDomains(cutoff, urlsPerDomain::put);
 
             logger.info("Fetched data for {} domains", urlsPerDomain.size());
 
@@ -280,5 +280,6 @@ public class LiveCrawlerMain extends ProcessMainClass {
             // so we don't need to do anything special from this process
         }
     }
+
 
 }

@@ -3,6 +3,9 @@ package nu.marginalia.api;
 import com.google.inject.Guice;
 import com.google.inject.Inject;
 import com.google.inject.Injector;
+import io.jooby.ExecutionMode;
+import io.jooby.Jooby;
+import io.jooby.Server;
 import nu.marginalia.service.MainClass;
 import nu.marginalia.service.discovery.ServiceRegistryIf;
 import nu.marginalia.service.module.ServiceConfiguration;
@@ -14,8 +17,11 @@ import nu.marginalia.service.server.Initialization;
 
 public class ApiMain extends MainClass {
 
+    private final ApiService service;
+
     @Inject
     public ApiMain(ApiService service) {
+        this.service = service;
     }
 
     public static void main(String... args) {
@@ -23,6 +29,7 @@ public class ApiMain extends MainClass {
 
         Injector injector = Guice.createInjector(
                 new DatabaseModule(false),
+                new PolarModule(),
                 new ServiceDiscoveryModule(),
                 new ServiceConfigurationModule(ServiceId.Api));
 
@@ -31,7 +38,20 @@ public class ApiMain extends MainClass {
         var configuration = injector.getInstance(ServiceConfiguration.class);
         orchestrateBoot(registry, configuration);
 
-        injector.getInstance(ApiMain.class);
+        var main = injector.getInstance(ApiMain.class);
         injector.getInstance(Initialization.class).setReady();
+        Jooby.runApp(new String[] { "application.env=prod" }, main.server(), ExecutionMode.WORKER, () -> new Jooby() {
+            {
+                main.start(this);
+            }
+        });
+    }
+
+    public Server server() {
+        return service.createServer();
+    }
+
+    public void start(Jooby jooby) {
+        service.startJooby(jooby);
     }
 }

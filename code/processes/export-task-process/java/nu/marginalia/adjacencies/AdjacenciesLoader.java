@@ -13,7 +13,7 @@ public class AdjacenciesLoader {
     private static final Logger logger = LoggerFactory.getLogger(AdjacenciesLoader.class);
 
     private final HikariDataSource dataSource;
-    private final LinkedBlockingDeque<WebsiteAdjacenciesCalculator.DomainSimilarities> similaritiesLinkedBlockingDeque = new LinkedBlockingDeque<>(100);
+    private final LinkedBlockingDeque<DomainSimilarities> similaritiesLinkedBlockingDeque = new LinkedBlockingDeque<>(100);
     private final Thread loaderThread;
 
     volatile boolean running = true;
@@ -24,7 +24,7 @@ public class AdjacenciesLoader {
         loaderThread = Thread.ofPlatform().name("Adjacencies Loader Thread").start(this::insertThreadRun);
     }
 
-    public void load(WebsiteAdjacenciesCalculator.DomainSimilarities similarities) {
+    public void load(DomainSimilarities similarities) {
         try {
             similaritiesLinkedBlockingDeque.putLast(similarities);
         } catch (InterruptedException e) {
@@ -45,7 +45,7 @@ public class AdjacenciesLoader {
 
             try (var stmt = conn.prepareStatement(
                     """
-                    INSERT INTO EC_DOMAIN_NEIGHBORS_TMP (DOMAIN_ID, NEIGHBOR_ID, RELATEDNESS) VALUES (?, ?, ?)
+                    REPLACE INTO EC_DOMAIN_NEIGHBORS_TMP (DOMAIN_ID, NEIGHBOR_ID, RELATEDNESS) VALUES (?, ?, ?)
                     """))
             {
                 int itemCount = 0;
@@ -55,10 +55,20 @@ public class AdjacenciesLoader {
                          item != null;
                          item = similaritiesLinkedBlockingDeque.pollFirst())
                     {
-                        for (var similarity : item.similarities()) {
-                            stmt.setInt(1, item.domainId());
-                            stmt.setInt(2, similarity.domainId());
-                            stmt.setDouble(3, similarity.value());
+                        for (var encoded : item.encodedSimilarities()) {
+                            int thisId = item.domainId();
+                            int otherId = DomainSimilarities.decodeOtherId(encoded);
+                            float similarity = DomainSimilarities.deocdeSimilarity(encoded);
+
+                            stmt.setInt(1, thisId);
+                            stmt.setInt(2, otherId);
+                            stmt.setDouble(3, similarity);
+                            stmt.addBatch();
+                            itemCount++;
+
+                            stmt.setInt(1, otherId);
+                            stmt.setInt(2, thisId);
+                            stmt.setDouble(3, similarity);
                             stmt.addBatch();
                             itemCount++;
                         }

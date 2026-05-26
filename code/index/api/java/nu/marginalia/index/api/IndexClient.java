@@ -1,16 +1,20 @@
 package nu.marginalia.index.api;
 
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
-import io.prometheus.client.Counter;
-import nu.marginalia.api.searchquery.IndexApiGrpc;
-import nu.marginalia.api.searchquery.RpcDecoratedResultItem;
-import nu.marginalia.api.searchquery.RpcIndexQuery;
+import io.grpc.ManagedChannel;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+import io.prometheus.metrics.core.metrics.Counter;
+import nu.marginalia.api.searchquery.*;
 import nu.marginalia.db.DomainBlacklistImpl;
 import nu.marginalia.model.id.UrlIdCodec;
-import nu.marginalia.nsfw.NsfwDomainFilter;
-import nu.marginalia.service.client.GrpcChannelPoolFactory;
-import nu.marginalia.service.client.GrpcMultiNodeChannelPool;
+import nu.marginalia.nsfw.document.NsfwDocumentFilter;
+import nu.marginalia.nsfw.domain.NsfwDomainFilter;
+import nu.marginalia.service.NodeConfigurationWatcherIf;
+import nu.marginalia.service.client.GrpcChannelPoolFactoryIf;
+import nu.marginalia.service.client.GrpcSingleNodeChannelPool;
 import nu.marginalia.service.discovery.property.ServiceKey;
 import nu.marginalia.service.discovery.property.ServicePartition;
 import org.slf4j.Logger;
@@ -21,18 +25,18 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 
 @Singleton
 public class IndexClient {
     private static final Logger logger = LoggerFactory.getLogger(IndexClient.class);
-    private final GrpcMultiNodeChannelPool<IndexApiGrpc.IndexApiBlockingStub> channelPool;
+    private final List<GrpcSingleNodeChannelPool<IndexApiGrpc.IndexApiFutureStub>> channelPools;
     private final DomainBlacklistImpl blacklist;
     private final NsfwDomainFilter nsfwDomainFilter;
+    private final NsfwDocumentFilter nsfwDocumentFilter;
 
-    Counter wmsa_index_query_count = Counter.build()
+    Counter wmsa_index_query_count = Counter.builder()
             .name("wmsa_nsfw_filter_result_count")
             .labelNames("tier")
             .help("Count of results filtered by NSFW tier")
@@ -43,13 +47,19 @@ public class IndexClient {
     private static final ExecutorService executor = useLoom ? Executors.newVirtualThreadPerTaskExecutor() : Executors.newCachedThreadPool();
 
     @Inject
-    public IndexClient(GrpcChannelPoolFactory channelPoolFactory,
+    public IndexClient(GrpcChannelPoolFactoryIf channelPoolFactory,
                        DomainBlacklistImpl blacklist,
-                       NsfwDomainFilter nsfwDomainFilter
+                       NsfwDomainFilter nsfwDomainFilter,
+                       NsfwDocumentFilter nsfwDocumentFilter,
+                       NodeConfigurationWatcherIf nodeConfigurationWatcher
                        ) {
-        this.channelPool = channelPoolFactory.createMulti(
-                ServiceKey.forGrpcApi(IndexApiGrpc.class, ServicePartition.multi()),
-                IndexApiGrpc::newBlockingStub);
+        this.nsfwDocumentFilter = nsfwDocumentFilter;
+        channelPools = new ArrayList<>();
+
+        for (int node: nodeConfigurationWatcher.getQueryNodes()) {
+            channelPools.add(channelPoolFactory.createSingle(ServiceKey.forGrpcApi(IndexApiGrpc.class, ServicePartition.partition(node)), IndexApiGrpc::newFutureStub));
+        }
+
         this.blacklist = blacklist;
         this.nsfwDomainFilter = nsfwDomainFilter;
     }
@@ -57,7 +67,12 @@ public class IndexClient {
     private static final Comparator<RpcDecoratedResultItem> comparator =
             Comparator.comparing(RpcDecoratedResultItem::getRankingScore);
 
-    public record Pagination(int page, int pageSize) {}
+    public record Pagination(int page, int pageSize) {
+        public Pagination(RpcQsQueryPagination pagination) {
+            this(pagination.getPage(), pagination.getPageSize());
+        }
+
+    }
 
     public record AggregateQueryResponse(List<RpcDecoratedResultItem> results,
                                          int page,
@@ -67,48 +82,95 @@ public class IndexClient {
     /** Execute a query on the index partitions and return the combined results. */
     public AggregateQueryResponse executeQueries(RpcIndexQuery indexRequest, Pagination pagination) {
 
-        final int requestedMaxResults = indexRequest.getQueryLimits().getResultsTotal();
         int filterTier = indexRequest.getNsfwFilterTierValue();
-        AtomicInteger totalNumResults = new AtomicInteger(0);
 
-        Instant bailInstant  = Instant.now().plusMillis((int) (1.5 * indexRequest.getQueryLimits().getTimeoutMs()));
+        Instant bailInstant  = Instant.now().plusMillis((int) (2 * indexRequest.getQueryLimits().getTimeoutMs()));
 
-        List<RpcDecoratedResultItem> results =
-                channelPool.call(IndexApiGrpc.IndexApiBlockingStub::query)
-                        .async(executor)
-                        .runEach(indexRequest)
-                        .stream()
-                        .map(future -> future.thenApply(iterator -> {
-                            List<RpcDecoratedResultItem> ret = new ArrayList<>(requestedMaxResults);
-                            iterator.forEachRemaining(ret::add);
-                            totalNumResults.addAndGet(ret.size());
-                            return ret;
-                        }))
-                        .mapMulti((CompletableFuture<List<RpcDecoratedResultItem>> fut, Consumer<List<RpcDecoratedResultItem>> c) ->{
-                            try {
-                                Instant now = Instant.now();
-                                if (now.isAfter(bailInstant)) {
-                                    c.accept(fut.get(0, TimeUnit.MILLISECONDS));
-                                }
-                                else {
-                                    c.accept(fut.get(Duration.between(now, bailInstant).toMillis(), TimeUnit.MILLISECONDS));
-                                }
-                            }
-                            catch (TimeoutException e) {
-                                logger.error("Index request timeout");
-                            }
-                            catch (Exception e) {
-                                logger.error("Error while fetching results", e);
-                            }
-                        })
-                        .flatMap(List::stream)
-                        .filter(item -> !isBlacklisted(item, filterTier))
-                        .sorted(comparator)
-                        .skip(Math.max(0, (pagination.page - 1) * pagination.pageSize))
-                        .limit(pagination.pageSize)
-                        .toList();
+        List<RpcDecoratedResultItem> results = new ArrayList<>();
+        List<Map.Entry<GrpcSingleNodeChannelPool.ConnectionHolder, ListenableFuture<RpcIndexQueryResponse>>> futures
+                = new ArrayList<>(channelPools.size());
 
-        return new AggregateQueryResponse(results, pagination.page(), totalNumResults.get());
+        for (var pool: channelPools) {
+            GrpcSingleNodeChannelPool.ConnectionHolder holder = null;
+            ManagedChannel channel = null;
+
+            for (var h : pool.getConnectionHolders()) {
+                if (h.hasErrorSince(Duration.ofSeconds(5)))
+                    continue;
+                holder = h;
+                channel = h.get();
+                break;
+            }
+
+            if (null == channel)
+                continue;
+
+            var fut = IndexApiGrpc.newFutureStub(channel)
+                            .withExecutor(executor)
+                            .withDeadlineAfter(Duration.ofMillis((int) (1.5 * indexRequest.getQueryLimits().getTimeoutMs())))
+                        .query(indexRequest);
+
+            futures.add(Map.entry(holder, fut));
+        }
+
+        for (var holderAndFuture: futures) {
+            var holder = holderAndFuture.getKey();
+            var future = holderAndFuture.getValue();
+            try {
+                Instant now = Instant.now();
+                if (now.isAfter(bailInstant)) {
+                    if (future.isDone()) {
+                        results.addAll(future.resultNow().getResultsList());
+                    }
+                    else {
+                        future.cancel(true);
+                    }
+                }
+                else {
+                    results.addAll(future.get(Duration.between(now, bailInstant).toMillis(), TimeUnit.MILLISECONDS).getResultsList());
+                }
+            }
+            catch (ExecutionException ex) {
+                if (ex.getCause() instanceof StatusRuntimeException sre) {
+                    switch (sre.getStatus().getCode()) {
+                        case DEADLINE_EXCEEDED -> logger.warn("Timeout: {}", sre.getMessage());
+                        case UNAVAILABLE -> {
+                            logger.warn("Unavailable: {}", sre.getMessage());
+                            holder.flagError();
+                        }
+                        case INTERNAL -> logger.warn("Internal Error in index: {}", sre);
+                        default -> logger.error("Error while fetching results", ex.getCause());
+                    }
+                }
+                else {
+                    holder.flagError();
+                    logger.error("Error while fetching results", ex.getCause());
+                }
+            }
+            catch (TimeoutException e) {
+                future.cancel(true);
+                logger.error("Index request timeout");
+            }
+            catch (Exception e) {
+                future.cancel(true);
+                logger.error("Error while fetching results", e);
+            }
+        }
+
+        results.removeIf(item -> isExcluded(item, filterTier));
+        results.sort(comparator);
+
+        int totalNumResults = results.size();
+
+        int sublistStart = Math.max(0, (pagination.page - 1) * pagination.pageSize);
+        int sublistEnd = Math.min(results.size(), sublistStart + pagination.pageSize);
+
+        List<RpcDecoratedResultItem> ret;
+
+        if (sublistStart < sublistEnd) ret = results.subList(sublistStart, sublistEnd);
+        else ret = List.of();
+
+        return new AggregateQueryResponse(ret, pagination.page(), totalNumResults);
     }
 
     static String[] tierNames = {
@@ -117,16 +179,22 @@ public class IndexClient {
             "NSFW"
     };
 
-    private boolean isBlacklisted(RpcDecoratedResultItem item, int filterTier) {
+    private boolean isExcluded(RpcDecoratedResultItem item, int filterTier) {
         int domainId = UrlIdCodec.getDomainId(item.getRawItem().getCombinedId());
 
         if (blacklist.isBlacklisted(domainId)) {
             return true;
         }
+
         if (nsfwDomainFilter.isBlocked(domainId, filterTier)) {
-            wmsa_index_query_count.labels(tierNames[filterTier]).inc();
+            wmsa_index_query_count.labelValues(tierNames[filterTier]).inc();
             return true;
         }
+
+        if (filterTier == 2 && nsfwDocumentFilter.isNsfw(item.getTitle(), item.getDescription())) {
+            return true;
+        }
+
         return false;
     }
 

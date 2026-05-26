@@ -5,11 +5,11 @@ import com.google.inject.Guice;
 import com.google.inject.Inject;
 import com.google.inject.Injector;
 import nu.marginalia.WmsaHome;
-import nu.marginalia.coordination.DomainCoordinationModule;
 import nu.marginalia.geoip.GeoIpDictionary;
 import nu.marginalia.mq.MessageQueueFactory;
 import nu.marginalia.mqapi.ProcessInboxNames;
 import nu.marginalia.mqapi.ping.PingRequest;
+import nu.marginalia.ping.fetcher.PingDnsFetcher;
 import nu.marginalia.process.ProcessConfiguration;
 import nu.marginalia.process.ProcessConfigurationModule;
 import nu.marginalia.process.ProcessMainClass;
@@ -19,6 +19,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.security.Security;
+import java.time.Duration;
+import java.time.Instant;
 
 public class PingMain extends ProcessMainClass {
     private static final Logger log = LoggerFactory.getLogger(PingMain.class);
@@ -41,14 +43,17 @@ public class PingMain extends ProcessMainClass {
         this.node = processConfiguration.node();
     }
 
-    public void runPrimary() {
-        log.info("Starting PingMain...");
+    public void run(Instant endTs) {
 
-        // Start the ping job scheduler
-        pingJobScheduler.start();
-        pingJobScheduler.enableForNode(node);
+        if (Instant.now().isBefore(endTs)) {
+            log.info("Starting PingMain...");
+            pingJobScheduler.run(endTs);
+            log.info("PingMain finished successfully.");
+        }
+        else {
+            logger.info("Time slot aleady exceeded, termingating");
+        }
 
-        log.info("PingMain started successfully.");
     }
 
     public static void main(String... args) throws Exception {
@@ -73,7 +78,6 @@ public class PingMain extends ProcessMainClass {
         Injector injector = Guice.createInjector(
                 new PingModule(),
                 new ServiceDiscoveryModule(),
-                new DomainCoordinationModule(),
                 new ProcessConfigurationModule("ping"),
                 new DatabaseModule(false)
         );
@@ -87,11 +91,8 @@ public class PingMain extends ProcessMainClass {
         var instructions = main.fetchInstructions(PingRequest.class);
 
         try {
-            main.runPrimary();
-            for(;;)
-                synchronized (main) { // Wait on the object lock to avoid busy-looping
-                    main.wait();
-                }
+            main.run(Instant.parse(instructions.value().endTs()));
+            instructions.ok();
         }
         catch (Throwable ex) {
             logger.error("Error running ping process", ex);

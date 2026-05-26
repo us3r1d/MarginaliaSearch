@@ -1,18 +1,23 @@
 package nu.marginalia.service.client;
 
 import io.grpc.ManagedChannel;
+import io.grpc.StatusRuntimeException;
 import nu.marginalia.service.NodeConfigurationWatcher;
+import nu.marginalia.service.NodeConfigurationWatcherIf;
 import nu.marginalia.service.discovery.ServiceRegistryIf;
 import nu.marginalia.service.discovery.property.PartitionTraits;
 import nu.marginalia.service.discovery.property.ServiceEndpoint;
 import nu.marginalia.service.discovery.property.ServiceKey;
 import nu.marginalia.service.discovery.property.ServicePartition;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
@@ -27,13 +32,13 @@ public class GrpcMultiNodeChannelPool<STUB> {
     private final ServiceKey<? extends PartitionTraits.Multicast> serviceKey;
     private final Function<ServiceEndpoint.InstanceAddress, ManagedChannel> channelConstructor;
     private final Function<ManagedChannel, STUB> stubConstructor;
-    private final NodeConfigurationWatcher nodeConfigurationWatcher;
+    private final NodeConfigurationWatcherIf nodeConfigurationWatcher;
 
     public GrpcMultiNodeChannelPool(ServiceRegistryIf serviceRegistryIf,
                                     ServiceKey<ServicePartition.Multi> serviceKey,
                                     Function<ServiceEndpoint.InstanceAddress, ManagedChannel> channelConstructor,
                                     Function<ManagedChannel, STUB> stubConstructor,
-                                    NodeConfigurationWatcher nodeConfigurationWatcher) {
+                                    NodeConfigurationWatcherIf nodeConfigurationWatcher) {
         this.serviceRegistryIf = serviceRegistryIf;
         this.serviceKey = serviceKey;
         this.channelConstructor = channelConstructor;
@@ -73,6 +78,21 @@ public class GrpcMultiNodeChannelPool<STUB> {
         return nodeConfigurationWatcher.getQueryNodes().size();
     }
 
+
+    public <T, I> List<T> callEach(Function<ManagedChannel, STUB> stubConstructor,
+                         BiFunction<STUB, I, T> call,
+                         I arg) throws RuntimeException
+    {
+        List<Integer> eligibleNodes = getEligibleNodes();
+        List<T> ret = new ArrayList<>(eligibleNodes.size());
+
+        for (Integer node: eligibleNodes) {
+            ret.add(getPoolForNode(node).call(stubConstructor, call, arg));
+        }
+
+        return ret;
+    }
+
     /** Create a new call builder for the given method.  This is a fluent-style
      * method, where you can chain calls to specify how to run the method.
      * <p></p>
@@ -100,11 +120,24 @@ public class GrpcMultiNodeChannelPool<STUB> {
         }
 
         /** Run the given method on each node, returning a list of results.
-         * This is a blocking method, where each call will be made in sequence */
-        public List<T> run(I arg) {
-            return getEligibleNodes().stream()
-                    .map(node -> getPoolForNode(node).call(method).run(arg))
-                    .toList();
+         * This is a blocking method, where each call will be made in sequence
+         *
+         * @param arg request
+         * @param exceptionCallback invoked when sending a request to a node fails
+         * */
+        public List<T> run(I arg, BiConsumer<Integer, RuntimeException> exceptionCallback) {
+            List<T> ret = new ArrayList<>();
+
+            for (int node: getEligibleNodes()) {
+                try {
+                    ret.add(getPoolForNode(node).call(method).run(arg));
+                }
+                catch (RuntimeException ex) {
+                    exceptionCallback.accept(node, ex);
+                }
+            }
+
+            return ret;
         }
 
         /** Generate an async call builder for the given method */

@@ -9,9 +9,9 @@
                 <div class="flex flex-row text-sm gap-1 xs:gap-2">
                     @for (var item : navbar.first().entries())
 
-                        <a href="${item.url()}" class="has-[:checked]:underline py-2 px-2 hover:text-slate-200">
+                        <a href="${item.url()}" class="has-[:checked]:underline py-2 px-2 hover:text-blue-200">
                             @if (item.active())
-                                <input type="checkbox" checked readonly class="sr-only" />
+                                <input type="checkbox" checked readonly class="hidden" tabindex="-1" />
                             @endif
                             ${item.name()}
                         </a>
@@ -19,9 +19,9 @@
                     @endfor
                     <div class="grow"></div>
                     @for (var item : navbar.second().entries())
-                        <a href="${item.url()}" class="has-[:checked]:underline  py-2 px-2 hover:text-slate-200">
+                        <a href="${item.url()}" class="has-[:checked]:underline  py-2 px-2 hover:text-blue-200">
                             @if (item.active())
-                                <input type="checkbox" checked readonly class="sr-only" />
+                                <input type="checkbox" checked readonly class="hidden" tabindex="-1" />
                             @endif
                             ${item.name()}
                         </a>

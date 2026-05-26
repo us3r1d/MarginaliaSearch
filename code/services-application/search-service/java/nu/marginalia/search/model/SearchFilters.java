@@ -13,6 +13,7 @@ public class SearchFilters {
     public final ReduceAdtechOption reduceAdtechOption;
     public final ShowRecentOption showRecentOption;
     public final SearchTitleOption searchTitleOption;
+    public final SearchNsfwOption searchNsfwOption;
 
     public final List<List<Filter>> filterGroups;
 
@@ -47,7 +48,8 @@ public class SearchFilters {
                 searchTitleOption,
                 showRecentOption,
                 removeJsOption,
-                reduceAdtechOption
+                reduceAdtechOption,
+                searchNsfwOption
                 );
     }
 
@@ -58,7 +60,11 @@ public class SearchFilters {
                 SearchRecentParameter.DEFAULT,
                 SearchTitleParameter.DEFAULT,
                 SearchAdtechParameter.DEFAULT,
+                SearchNsfwParameter.NO_FILTER,
                 "en",
+                "GET",
+                null,
+                null,
                 false,
                 1));
     }
@@ -69,6 +75,7 @@ public class SearchFilters {
         reduceAdtechOption = new ReduceAdtechOption(parameters);
         showRecentOption = new ShowRecentOption(parameters);
         searchTitleOption = new SearchTitleOption(parameters);
+        searchNsfwOption = new SearchNsfwOption(parameters);
 
 
         currentFilter = parameters.profile().filterId;
@@ -77,18 +84,17 @@ public class SearchFilters {
                             List.of(
                                     new Filter("All", "fa-globe", SearchProfile.NO_FILTER, parameters),
                                     new Filter("Blogs", "fa-blog", SearchProfile.BLOGOSPHERE, parameters),
-                                    new Filter("Academia", "fa-university", SearchProfile.ACADEMIA, parameters)
-                            ),
-                            List.of(
+                                    new Filter("Academia", "fa-university", SearchProfile.ACADEMIA, parameters),
                                     new Filter("Vintage", "fa-clock-rotate-left", SearchProfile.VINTAGE, parameters),
-                                    new Filter("Small Web", "fa-minus", SearchProfile.SMALLWEB, parameters),
-                                    new Filter("Plain Text", "fa-file", SearchProfile.PLAIN_TEXT, parameters),
-                                    new Filter("Tilde", "fa-house", SearchProfile.TILDE, parameters)
+                                    new Filter("Small Web", "fa-minus", SearchProfile.SMALLWEB, parameters)
                             ),
                             List.of(
-                                new Filter("Wikis", "fa-pencil", SearchProfile.WIKI, parameters),
+                                new Filter("Wikis", "fa-book", SearchProfile.WIKI, parameters),
                                 new Filter("Forums", "fa-comments", SearchProfile.FORUM, parameters),
                                 new Filter("Recipes", "fa-utensils", SearchProfile.FOOD, parameters)
+                            ),
+                            List.of(
+                                    new Filter("Custom Filter", "fa-pencil", SearchProfile.CUSTOM, parameters)
                             )
                         );
 
@@ -101,7 +107,7 @@ public class SearchFilters {
         public final String url;
 
         public String value() {
-            return this.value.name();
+            return this.value.value;
         }
 
         public String getUrl() {
@@ -119,7 +125,7 @@ public class SearchFilters {
         }
 
         public String name() {
-            return "Remove Javascript";
+            return "Remove JS";
         }
 
         public RemoveJsOption(SearchParameters parameters) {
@@ -140,7 +146,7 @@ public class SearchFilters {
         public final String url;
 
         public String value() {
-            return this.value.name();
+            return this.value.value;
         }
 
         public String id() {
@@ -179,7 +185,7 @@ public class SearchFilters {
         private final String icon = "fa-baby";
 
         public String value() {
-            return this.value.name();
+            return this.value.value;
         }
 
         public final String url;
@@ -220,7 +226,7 @@ public class SearchFilters {
         public final String url;
 
         public String value() {
-            return this.value.name();
+            return this.value.value;
         }
 
         public String id() {
@@ -250,6 +256,46 @@ public class SearchFilters {
             };
 
             this.url = parameters.withTitle(toggledValue).renderUrl();
+        }
+    }
+
+    public class SearchNsfwOption implements SearchOption {
+        private final SearchNsfwParameter value;
+        public String icon = "fa-face-kiss";
+
+        public final String url;
+
+        public String value() {
+            return this.value.value;
+        }
+
+        public String id() {
+            return getClass().getSimpleName();
+        }
+        public String icon() {
+            return icon;
+        }
+        public String getUrl() {
+            return url;
+        }
+
+        public boolean isSet() {
+            return value.equals(SearchNsfwParameter.DO_FILTER);
+        }
+
+        public String name() {
+            return "Reduce NSFW";
+        }
+
+        public SearchNsfwOption(SearchParameters parameters) {
+            this.value = parameters.nsfw();
+
+            var toggledValue = switch (parameters.nsfw()) {
+                case DO_FILTER -> SearchNsfwParameter.NO_FILTER;
+                default -> SearchNsfwParameter.DO_FILTER;
+            };
+
+            this.url = parameters.withNsfw(toggledValue).renderUrl();
         }
     }
 

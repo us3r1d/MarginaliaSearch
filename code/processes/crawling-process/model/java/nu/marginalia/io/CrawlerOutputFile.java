@@ -3,6 +3,7 @@ package nu.marginalia.io;
 import org.apache.logging.log4j.util.Strings;
 
 import java.io.IOException;
+import java.net.IDN;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -11,10 +12,10 @@ public class CrawlerOutputFile {
     private static String filesystemSafeName(String name) {
         StringBuilder nameSaneBuilder = new StringBuilder();
 
-        name.chars()
+        IDN.toASCII(name).chars()
                 .map(Character::toLowerCase)
                 .map(c -> (c & ~0x7F) == 0 ? c : 'X')
-                .map(c -> (Character.isDigit(c) || Character.isAlphabetic(c) || c == '.') ? c : 'X')
+                .map(c -> (Character.isDigit(c) || Character.isAlphabetic(c) || c == '.' || c == '-') ? c : 'X')
                 .limit(128)
                 .forEach(c -> nameSaneBuilder.append((char) c));
 
@@ -46,16 +47,6 @@ public class CrawlerOutputFile {
             Files.createDirectories(destDir);
         }
         return destDir.resolve(id + "-" + filesystemSafeName(domain) + ".slop.zip");
-    }
-
-    public static Path getParquetPath(Path basePath, String id, String domain) {
-        id = padId(id);
-
-        String first = id.substring(0, 2);
-        String second = id.substring(2, 4);
-
-        Path destDir = basePath.resolve(first).resolve(second);
-        return destDir.resolve(id + "-" + filesystemSafeName(domain) + ".parquet");
     }
 
     public static Path getSlopPath(Path basePath, String id, String domain) {

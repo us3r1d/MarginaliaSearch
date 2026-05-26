@@ -1,15 +1,20 @@
 package nu.marginalia.api.svc;
 
-import com.google.common.base.Strings;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import com.zaxxer.hikari.HikariDataSource;
 import nu.marginalia.api.model.ApiLicense;
+import nu.marginalia.api.model.ApiLicenseOptions;
+import nu.marginalia.api.polar.PolarBenefit;
+import nu.marginalia.api.polar.PolarBenefits;
+import nu.marginalia.api.polar.PolarClient;
+import nu.marginalia.api.polar.PolarLicenseKey;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import spark.Spark;
 
+import java.io.IOException;
+import java.util.EnumSet;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Singleton
@@ -18,43 +23,102 @@ public class LicenseService {
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
     private final HikariDataSource dataSource;
+    private final PolarClient polarClient;
+    private final PolarBenefits polarBenefits;
     private final ConcurrentHashMap<String, ApiLicense> licenseCache = new ConcurrentHashMap<>();
 
     @Inject
-    public LicenseService(HikariDataSource dataSource) {
+    public LicenseService(HikariDataSource dataSource,
+                          PolarClient polarClient,
+                          PolarBenefits polarBenefits
+                          ) {
         this.dataSource = dataSource;
+        this.polarClient = polarClient;
+        this.polarBenefits = polarBenefits;
     }
+
+    public static class NoSuchKeyException extends Exception {}
 
     @NotNull
-    public ApiLicense getLicense(String key) {
-        if (Strings.isNullOrEmpty(key)) {
-            Spark.halt(400, "Bad key");
-        }
+    public ApiLicense getLicense(String key) throws NoSuchKeyException, IOException {
+        var cachedLicense = licenseCache.get(key);
+        if (cachedLicense != null) return cachedLicense;
 
-        return licenseCache.computeIfAbsent(key, this::getFromDb);
+        if (key.startsWith("POL")) {
+            var polarLicense = getFromPolarSh(key);
+            licenseCache.put(key, polarLicense);
+            return polarLicense;
+        }
+        else { // DB license
+            var dbLicense = getFromDb(key);
+            licenseCache.put(key, dbLicense);
+            return dbLicense;
+        }
     }
 
-    private ApiLicense getFromDb(String key) {
+    private ApiLicense getFromPolarSh(String key) throws NoSuchKeyException, IOException {
+        PolarLicenseKey polarLicense = polarClient.validateLicenseKey(key).orElseThrow(NoSuchKeyException::new);
+        PolarBenefit benefit = polarBenefits.getBenefit(polarLicense).orElseThrow(NoSuchKeyException::new);
+
+        EnumSet<ApiLicenseOptions> options = EnumSet.of(
+                ApiLicenseOptions.ADUIT_USAGE,
+                ApiLicenseOptions.SOURCE_POLAR
+                );
+
+        if (benefit.allowQueryOveruse()) {
+            options.add(ApiLicenseOptions.ALLOW_QUERY_DAILY_OVERUSE);
+        }
+        if (benefit.allowSiteInfoOveruse()) {
+            options.add(ApiLicenseOptions.ALLOW_SITE_INFO_DAILY_OVERUSE);
+        }
+
+        ApiLicense license = new ApiLicense(
+                key,
+                benefit.license(),
+                key,
+                benefit.ratePerMinMax(),
+                benefit.rateDaily(),
+                benefit.siteInfoRatePerMinMax(),
+                benefit.siteInfoRateDaily(),
+                options
+        );
+
+        return license;
+    }
+
+    private ApiLicense getFromDb(String key) throws NoSuchKeyException {
         try (var conn = dataSource.getConnection();
-            var stmt = conn.prepareStatement("SELECT LICENSE,NAME,RATE FROM EC_API_KEY WHERE LICENSE_KEY=?")) {
+            var stmt = conn.prepareStatement("SELECT LICENSE,NAME,RATE,SITE_INFO_RATE FROM EC_API_KEY WHERE LICENSE_KEY=?")) {
 
             stmt.setString(1, key);
 
             var rsp = stmt.executeQuery();
 
             if (rsp.next()) {
-                return new ApiLicense(key, rsp.getString(1), rsp.getString(2), rsp.getInt(3));
+                int rate = rsp.getInt("RATE");
+                int siteInfoRate = rsp.getInt("SITE_INFO_RATE");
+
+                return new ApiLicense(key,
+                        rsp.getString("LICENSE"),
+                        rsp.getString("NAME"),
+                        rate,
+                        2_000,
+                        siteInfoRate,
+                        5_000,
+                        EnumSet.of(
+                                ApiLicenseOptions.ALLOW_V1_API,
+                                ApiLicenseOptions.SOURCE_INTERNAL
+                                )
+                        );
             }
 
         }
         catch (Exception ex) {
             logger.error("Bad request", ex);
-            Spark.halt(500);
+            throw new IllegalArgumentException();
         }
 
-        Spark.halt(401, "Invalid license key");
-
-        throw new IllegalStateException("This is unreachable");
+        throw new NoSuchKeyException();
     }
 
     public void flushCache() {

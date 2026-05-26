@@ -25,7 +25,6 @@ dependencies {
 
     implementation project(':third-party:porterstemmer')
     implementation project(':third-party:count-min-sketch')
-    implementation project(':third-party:parquet-floor')
 
     implementation project(':code:index:api')
     implementation project(':code:processes:process-mq-api')
@@ -34,14 +33,16 @@ dependencies {
     implementation project(':code:common:db')
     implementation project(':code:common:service')
     implementation project(':code:common:config')
+
     implementation project(':code:libraries:message-queue')
     implementation project(':code:libraries:blocking-thread-pool')
-
     implementation project(':code:libraries:guarded-regex')
     implementation project(':code:libraries:easy-lsh')
     implementation project(':code:libraries:coded-sequence')
     implementation project(':code:libraries:geo-ip')
+
     implementation project(':code:functions:language-processing')
+    implementation project(':code:functions:nsfw-filter')
 
     implementation project(':code:processes:converting-process:model')
     implementation project(':code:processes:converting-process:ft-dom-classifier')
@@ -51,7 +52,7 @@ dependencies {
     implementation project(':code:processes:crawling-process:ft-link-parser')
     implementation project(':code:processes:crawling-process:ft-content-type')
 
-    implementation project(':code:functions:live-capture:api')
+    implementation project(':code:index:live-capture:api')
 
     testImplementation project(':code:functions:language-processing')
 
@@ -95,10 +96,13 @@ dependencies {
     testImplementation libs.bundles.junit
     testImplementation libs.mockito
 
-    testImplementation platform('org.testcontainers:testcontainers-bom:1.17.4')
+    testImplementation platform('org.testcontainers:testcontainers-bom:1.21.4') {
+        exclude group: 'org.apache.commons'
+    }
+    testImplementation libs.commons.compress
     testImplementation libs.commons.codec
-    testImplementation 'org.testcontainers:mariadb:1.17.4'
-    testImplementation 'org.testcontainers:junit-jupiter:1.17.4'
+    testImplementation 'org.testcontainers:mariadb:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
     testImplementation project(':code:libraries:test-helpers')
     testImplementation project(':third-party:encyclopedia-marginalia-nu')
     testImplementation project(':code:processes:test-data')

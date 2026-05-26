@@ -1,6 +1,7 @@
 package nu.marginalia.search.command;
 
 import com.google.inject.Inject;
+import io.jooby.Context;
 import io.jooby.MapModelAndView;
 import io.jooby.ModelAndView;
 import nu.marginalia.language.config.LanguageConfiguration;
@@ -28,12 +29,14 @@ public class ConvertCommand implements SearchCommandInterface {
     }
 
     @Override
-    public Optional<ModelAndView<?>> process(SearchParameters parameters) {
+    public Optional<ModelAndView<?>> process(SearchParameters parameters, Context ctx) {
         var conversion = searchUnitConversionService.tryConversion(parameters.query());
         return conversion.map(s -> new MapModelAndView("serp/unit-conversion.jte",
                 Map.of(
                 "parameters", parameters,
                 "navbar", NavbarModel.SEARCH,
+                "requestMethod", parameters.requestMethod(),
+                "displayUrl", parameters.renderUrl(),
                 "languageDefinitions", languageConfiguration.languagesMap(),
                 "result", s)
         ));

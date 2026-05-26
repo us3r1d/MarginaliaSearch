@@ -64,9 +64,11 @@ public class SentenceSegmentSplitter {
         }
 
         List<String> ret = new ArrayList<>(words.size());
-        BitSet seps = new BitSet(separators.size());
 
         String[] parts = words.toArray(String[]::new);
+
+        BitSet seps = new BitSet(separators.size());
+
         for (int i = 0; i < parts.length; i++) {
             if (parts[i].isBlank())
                 continue;
@@ -75,10 +77,8 @@ public class SentenceSegmentSplitter {
             if (noiseCharacterMatcher.matchesAllOf(parts[i]))
                 continue;
 
+            seps.set(ret.size(), separators.get(i) != 0);
             ret.add(parts[i]);
-            if (separators.getQuick(i) > 0) {
-                seps.set(i);
-            }
         }
 
         for (int i = 0; i < ret.size(); i++) {
@@ -103,7 +103,9 @@ public class SentenceSegmentSplitter {
 
         if (ret.size() > maxLength) {
             ret.subList(maxLength, ret.size()).clear();
-            seps = seps.get(0, maxLength);
+        }
+        if (seps.size() > ret.size()) {
+            seps = seps.get(0, ret.size());
         }
 
         return new SeparatedSentence(

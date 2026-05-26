@@ -3,7 +3,7 @@ package nu.marginalia.linkgraph;
 import com.google.inject.Inject;
 import io.grpc.stub.StreamObserver;
 import nu.marginalia.api.linkgraph.*;
-import nu.marginalia.api.linkgraph.LinkGraphApiGrpc.LinkGraphApiBlockingStub;
+import nu.marginalia.api.linkgraph.PartitionLinkGraphApiGrpc.PartitionLinkGraphApiBlockingStub;
 import nu.marginalia.service.server.DiscoverableService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,10 +11,11 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 
 /** This class is responsible for aggregating the link graph data from the partitioned link graph
- * services.
+ * services.  It exposes its own gRPC service (AggregateLinkGraphApi) distinct from the per-partition
+ * LinkGraphApi to avoid ambiguous service discovery.
  */
 public class AggregateLinkGraphService
-        extends LinkGraphApiGrpc.LinkGraphApiImplBase
+        extends AggregateLinkGraphApiGrpc.AggregateLinkGraphApiImplBase
         implements DiscoverableService
 {
     private static final Logger logger = LoggerFactory.getLogger(AggregateLinkGraphService.class);
@@ -29,8 +30,8 @@ public class AggregateLinkGraphService
     public void getAllLinks(Empty request,
                             StreamObserver<RpcDomainIdPairs> responseObserver) {
 
-        client.getChannelPool().call(LinkGraphApiBlockingStub::getAllLinks)
-                .run(Empty.getDefaultInstance())
+        client.getChannelPool().call(PartitionLinkGraphApiBlockingStub::getAllLinks)
+                .run(Empty.getDefaultInstance(), (node, ex) -> { throw ex; })
                 .forEach(iter -> iter.forEachRemaining(responseObserver::onNext));
 
         responseObserver.onCompleted();
@@ -41,8 +42,8 @@ public class AggregateLinkGraphService
                                    StreamObserver<RpcDomainIdList> responseObserver) {
         var rspBuilder = RpcDomainIdList.newBuilder();
 
-        client.getChannelPool().call(LinkGraphApiBlockingStub::getLinksFromDomain)
-                .run(request)
+        client.getChannelPool().call(PartitionLinkGraphApiBlockingStub::getLinksFromDomain)
+                .run(request, (node, ex) -> logger.warn("Failed to invoke getLinksFromDomain() on partition {}", node, ex))
                 .stream()
                 .map(RpcDomainIdList::getDomainIdList)
                 .flatMap(List::stream)
@@ -58,8 +59,8 @@ public class AggregateLinkGraphService
         var rspBuilder = RpcDomainIdList.newBuilder();
 
 
-        client.getChannelPool().call(LinkGraphApiBlockingStub::getLinksToDomain)
-                .run(request)
+        client.getChannelPool().call(PartitionLinkGraphApiBlockingStub::getLinksToDomain)
+                .run(request, (node, ex) -> logger.warn("Failed to invoke getLinksToDomain() on partition {}", node, ex))
                 .stream()
                 .map(RpcDomainIdList::getDomainIdList)
                 .flatMap(List::stream)
@@ -72,8 +73,8 @@ public class AggregateLinkGraphService
     @Override
     public void countLinksFromDomain(RpcDomainId request,
                                      StreamObserver<RpcDomainIdCount> responseObserver) {
-        int sum = client.getChannelPool().call(LinkGraphApiBlockingStub::countLinksFromDomain)
-                .run(request)
+        int sum = client.getChannelPool().call(PartitionLinkGraphApiBlockingStub::countLinksFromDomain)
+                .run(request, (node, ex) -> logger.warn("Failed to invoke countLinksFromDomain() on partition {}", node, ex))
                 .stream()
                 .mapToInt(RpcDomainIdCount::getIdCount)
                 .sum();
@@ -88,8 +89,8 @@ public class AggregateLinkGraphService
     public void countLinksToDomain(RpcDomainId request,
                                    StreamObserver<RpcDomainIdCount> responseObserver) {
 
-        int sum = client.getChannelPool().call(LinkGraphApiBlockingStub::countLinksToDomain)
-                .run(request)
+        int sum = client.getChannelPool().call(PartitionLinkGraphApiBlockingStub::countLinksToDomain)
+                .run(request, (node, ex) -> logger.warn("Failed to invoke countLinksToDomain() on partition {}", node, ex))
                 .stream()
                 .mapToInt(RpcDomainIdCount::getIdCount)
                 .sum();

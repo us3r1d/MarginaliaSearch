@@ -14,8 +14,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 
-import static nu.marginalia.crawl.fetcher.warc.ErrorBuffer.suppressContentEncoding;
-
 /** Input buffer for temporary storage of a HTTP response
  *  This may be in-memory or on-disk, at the discretion of
  *  the implementation.
@@ -46,7 +44,8 @@ public abstract class WarcInputBuffer implements AutoCloseable {
      */
     static WarcInputBuffer forResponse(ClassicHttpResponse response,
                                        HttpGet request,
-                                       Duration timeLimit) throws IOException {
+                                       Duration timeLimit,
+                                       Path tempDir) throws IOException {
         if (response == null)
             return new ErrorBuffer();
 
@@ -61,14 +60,20 @@ public abstract class WarcInputBuffer implements AutoCloseable {
         InputStream is = null;
         try {
             is = entity.getContent();
+
             long length = entity.getContentLength();
 
+            if (length == 0) {
+                return new ErrorBuffer();
+            }
+
             if (length > 0 && length < 8192) {
-                // If the content is small and not compressed, we can just read it into memory
                 return new MemoryBuffer(response.getHeaders(), request, timeLimit, is, (int) length);
-            } else {
-                // Otherwise, we unpack it into a file and read it from there
-                return new FileBuffer(response.getHeaders(), request, timeLimit, is);
+            }
+            else {
+                // handles both the negative length case (e.g. HTTP 1.0)
+                // and the known length case
+                return new FileBuffer(response.getHeaders(), request, timeLimit, is, tempDir);
             }
         }
         finally {
@@ -93,6 +98,7 @@ public abstract class WarcInputBuffer implements AutoCloseable {
                 }
             }
             catch (IOException e) {
+                request.abort();
                 // Ignore the exception
             }
             finally {
@@ -252,7 +258,7 @@ class ErrorBuffer extends WarcInputBuffer {
 class MemoryBuffer extends WarcInputBuffer {
     byte[] data;
     public MemoryBuffer(Header[] headers, HttpGet request, Duration timeLimit, InputStream responseStream, int size) {
-        super(suppressContentEncoding(headers));
+        super(headers);
 
         if (!isRangeComplete(headers)) {
             truncationReason = WarcTruncationReason.LENGTH;
@@ -286,8 +292,8 @@ class MemoryBuffer extends WarcInputBuffer {
 class FileBuffer extends WarcInputBuffer {
     private final Path tempFile;
 
-    public FileBuffer(Header[] headers, HttpGet request, Duration timeLimit, InputStream responseStream) throws IOException {
-        super(suppressContentEncoding(headers));
+    public FileBuffer(Header[] headers, HttpGet request, Duration timeLimit, InputStream responseStream, Path tempDir) throws IOException {
+        super(headers);
 
         if (!isRangeComplete(headers)) {
             truncationReason = WarcTruncationReason.LENGTH;
@@ -295,7 +301,7 @@ class FileBuffer extends WarcInputBuffer {
             truncationReason = WarcTruncationReason.NOT_TRUNCATED;
         }
 
-        this.tempFile = Files.createTempFile("rsp", ".html");
+        this.tempFile = Files.createTempFile(tempDir, "rsp", ".html");
 
         try (var out = Files.newOutputStream(tempFile)) {
             copy(responseStream, request, out, timeLimit);

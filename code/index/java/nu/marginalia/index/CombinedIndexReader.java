@@ -6,11 +6,8 @@ import nu.marginalia.api.searchquery.model.compiled.aggregate.CompiledQueryAggre
 import nu.marginalia.api.searchquery.model.query.SpecificationLimitType;
 import nu.marginalia.array.page.LongQueryBuffer;
 import nu.marginalia.index.forward.ForwardIndexReader;
-import nu.marginalia.index.forward.spans.DocumentSpans;
-import nu.marginalia.index.model.CombinedDocIdList;
-import nu.marginalia.index.model.QueryParams;
-import nu.marginalia.index.model.SearchContext;
-import nu.marginalia.index.model.TermMetadataList;
+import nu.marginalia.index.forward.spans.DecodableDocumentSpans;
+import nu.marginalia.index.model.*;
 import nu.marginalia.index.reverse.FullReverseIndexReader;
 import nu.marginalia.index.reverse.IndexLanguageContext;
 import nu.marginalia.index.reverse.PrioReverseIndexReader;
@@ -19,20 +16,25 @@ import nu.marginalia.index.reverse.query.IndexSearchBudget;
 import nu.marginalia.index.reverse.query.filter.QueryFilterStepIf;
 import nu.marginalia.model.id.UrlIdCodec;
 import nu.marginalia.model.idx.DocumentMetadata;
+import nu.marginalia.sequence.CodedSequence;
+import nu.marginalia.skiplist.SkipListReader;
 import nu.marginalia.skiplist.SkipListValueRanges;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.CheckReturnValue;
+import java.io.IOException;
 import java.lang.foreign.Arena;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Predicate;
 
 /** A reader for the combined forward and reverse indexes.
@@ -47,6 +49,15 @@ public class CombinedIndexReader {
     private final ForwardIndexReader forwardIndexReader;
     private final FullReverseIndexReader reverseIndexFullReader;
     private final PrioReverseIndexReader reverseIndexPriorityReader;
+
+    private final ReadWriteLock leaseLock = new ReentrantReadWriteLock();
+
+    public final Lock useLock() {
+        return leaseLock.readLock();
+    }
+    public final Lock closeLock() {
+        return leaseLock.writeLock();
+    }
 
     public CombinedIndexReader(ForwardIndexReader forwardIndexReader,
                                FullReverseIndexReader reverseIndexFullReader,
@@ -97,8 +108,14 @@ public class CombinedIndexReader {
 
         @Nullable
         SkipListValueRanges mandatoryDocumentRanges = context.mandatoryDomainIds.isEmpty() ? null : getDocumentRangesForDomains(context.mandatoryDomainIds);
+
         @Nullable
         SkipListValueRanges excludedDocumentRanges = context.excludedDomainIds.isEmpty() ? null : getDocumentRangesForDomains(context.excludedDomainIds);
+
+        List<String> domainTerms = new ArrayList<>(context.termIdsDomain.size());
+        for (long id : context.termIdsDomain) {
+            domainTerms.add(termIdToString.getOrDefault(id, "???"));
+        }
 
         for (var path : paths) {
             LongList elements = new LongArrayList(path);
@@ -113,22 +130,49 @@ public class CombinedIndexReader {
                 return 0;
             });
 
-            var head = findFullWord(languageContext, mandatoryDocumentRanges, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
-            if (!head.isNoOp()) {
-                for (int i = 1; i < elements.size(); i++) {
-                    head.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
+            if (mandatoryDocumentRanges != null || context.termIdsDomain.isEmpty()) {
+                IndexQueryBuilder head = findFullWord(languageContext, mandatoryDocumentRanges, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
+                if (!head.isNoOp()) {
+                    for (int i = 1; i < elements.size(); i++) {
+                        head.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
+                    }
+                    queryHeads.add(head);
                 }
-                queryHeads.add(head);
+            }
+            if (!context.termIdsDomain.isEmpty()) {
+                IndexQueryBuilder head = findFullWord(languageContext, null, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
+                if (!head.isNoOp()) {
+                    for (int i = 1; i < elements.size(); i++) {
+                        head.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
+                    }
+                    head.addInclusionFilter(hasAnyWordFull(languageContext, domainTerms, context.termIdsDomain, context.budget));
+                    queryHeads.add(head);
+                }
             }
 
             // If there are few paths, we can afford to check the priority index as well
-            if (paths.size() < 4) {
-                var prioHead = findPriorityWord(languageContext, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
-                if (!prioHead.isNoOp()) {
-                    for (int i = 1; i < elements.size(); i++) {
-                        prioHead.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
+            if (paths.size() < 4 && context.termIdsDomain.size() < 4) {
+                if (mandatoryDocumentRanges != null || context.termIdsDomain.isEmpty()) {
+                    IndexQueryBuilder prioHead = findPriorityWord(languageContext, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
+                    if (!prioHead.isNoOp()) {
+                        for (int i = 1; i < elements.size(); i++) {
+                            prioHead.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
+                        }
+                        if (mandatoryDocumentRanges != null) {
+                            prioHead.requiringDomains(mandatoryDocumentRanges);
+                        }
+                        queryHeads.add(prioHead);
                     }
-                    queryHeads.add(prioHead);
+                }
+                if (!context.termIdsDomain.isEmpty()) {
+                    IndexQueryBuilder head = findPriorityWord(languageContext, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
+                    if (!head.isNoOp()) {
+                        for (int i = 1; i < elements.size(); i++) {
+                            head.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
+                        }
+                        head.addInclusionFilter(hasAnyWordFull(languageContext, domainTerms, context.termIdsDomain, context.budget));
+                        queryHeads.add(head);
+                    }
                 }
             }
         }
@@ -136,11 +180,10 @@ public class CombinedIndexReader {
         // Add additional conditions to the query heads
         for (var query : queryHeads) {
 
-            if (mandatoryDocumentRanges != null) query.requiringDomains(mandatoryDocumentRanges);
             if (excludedDocumentRanges != null) query.rejectingDomains(excludedDocumentRanges);
 
-            // Advice terms are a special case, mandatory but not ranked, and exempt from re-writing
-            for (long termId : context.termIdsAdvice) {
+            // Require terms are a special case, mandatory but not ranked, and exempt from re-writing
+            for (long termId : context.termIdsRequire) {
                 query = query.also(termIdToString.getOrDefault(termId, "???"), termId, context.budget);
             }
 
@@ -177,6 +220,10 @@ public class CombinedIndexReader {
 
     public QueryFilterStepIf hasWordFull(IndexLanguageContext languageContext, String term, long termId, IndexSearchBudget budget) {
         return reverseIndexFullReader.also(languageContext, term, termId, budget);
+    }
+
+    public QueryFilterStepIf hasAnyWordFull(IndexLanguageContext languageContext, List<String> terms, LongList termIds, IndexSearchBudget budget) {
+        return reverseIndexFullReader.any(languageContext, terms, termIds, budget);
     }
 
     /** Creates a query builder for terms in the priority index */
@@ -223,13 +270,16 @@ public class CombinedIndexReader {
         return new ParamMatchingQueryFilter(params, forwardIndexReader);
     }
 
-    /** Retrieves the term metadata for the specified word for the provided documents */
-    public TermMetadataList[] getTermMetadata(Arena arena,
-                                              SearchContext searchContext,
-                                              CombinedDocIdList docIds)
-    throws TimeoutException
-    {
-        return reverseIndexFullReader.getTermData(arena, searchContext, docIds);
+    @Nullable
+    @CheckReturnValue
+    public SkipListReader.ValueReader getValueReader(SearchContext searchContext,
+                                                     long termId,
+                                                     CombinedDocIdList keys) {
+        return reverseIndexFullReader.getValueReader(searchContext, termId, keys);
+    }
+
+    public BitSet getValuePresence(SearchContext searchContext, long termId, CombinedDocIdList keys) {
+        return reverseIndexFullReader.getValuePresence(searchContext, termId, keys);
     }
 
     /** Retrieves the document metadata for the specified document */
@@ -253,46 +303,57 @@ public class CombinedIndexReader {
     }
 
     /** Retrieves the document spans for the specified documents */
-    public DocumentSpans[] getDocumentSpans(Arena arena,
-                                            IndexSearchBudget budget,
-                                            CombinedDocIdList docIds,
-                                            BitSet docIdsMask
-                                            ) throws TimeoutException {
-        return forwardIndexReader.getDocumentSpans(arena, budget, docIds, docIdsMask);
+
+    @Nullable
+    public DecodableDocumentSpans getDocumentSpans(Arena arena, long documentId) {
+        return forwardIndexReader.getDocumentSpans(arena, documentId);
     }
 
-    /** Close the indexes (this is not done immediately)
+    public CodedSequence[] getTermPositions(Arena arena, long[] codedOffsets) {
+        return reverseIndexFullReader.getTermPositions(arena, codedOffsets);
+    }
+
+    /** Close the indexes.  This blocks the calling thread until all users are finished.
      * */
-    public void close() {
-       /* Delay the invocation of close method to allow for a clean shutdown of the service.
-        *
-        * This is especially important when using Unsafe-based LongArrays, since we have
-        * concurrent access to the underlying memory-mapped file.  If pull the rug from
-        * under the caller by closing the file, we'll get a SIGSEGV.  Even with MemorySegment,
-        * we'll get ugly stacktraces if we close the file while a thread is still accessing it.
-        */
+    public boolean close() {
+        var closeLock = closeLock();
 
-        delayedCall(forwardIndexReader::close, Duration.ofMinutes(1));
-        delayedCall(reverseIndexFullReader::close, Duration.ofMinutes(1));
-        delayedCall(reverseIndexPriorityReader::close, Duration.ofMinutes(1));
-    }
-
-
-    private void delayedCall(Runnable call, Duration delay) {
-        Thread.ofPlatform().start(() -> {
-            try {
-                TimeUnit.SECONDS.sleep(delay.toSeconds());
-                call.run();
-            } catch (InterruptedException e) {
-                logger.error("Interrupted", e);
+        try {
+            // Diagnostic for detecting if we have a read lock that is stuck or abandoned somewhere
+            if (!closeLock.tryLock(10, TimeUnit.MINUTES)) {
+                logger.error("Failed to acquire close lock");
+                return false;
             }
-        });
+        } catch (InterruptedException e) {
+            logger.info("Interrupted while waiting for close lock", e);
+        }
+
+        try {
+            forwardIndexReader.close();
+        } catch (Throwable t) {
+            logger.error("Failed to close forward index reader", t);
+        }
+
+        try {
+            reverseIndexFullReader.close();
+        } catch (Throwable t) {
+            logger.error("Failed to close full reverse index reader", t);
+        }
+
+        try {
+            reverseIndexPriorityReader.close();
+        } catch (Throwable t) {
+            logger.error("Failed to close prio reverse index reader", t);
+        }
+
+        // We don't unlock here, as the index is no longer readable ever
+        return true;
     }
 
     /** Returns true if index data is available */
     public boolean isLoaded() {
         // We only need to check one of the readers, as they are either all loaded or none are
-        return forwardIndexReader.isLoaded();
+        return forwardIndexReader.isLoaded() && reverseIndexFullReader.isLoaded();
     }
 }
 

@@ -33,7 +33,6 @@ dependencies {
     implementation project(':code:functions:language-processing')
     implementation project(':code:libraries:coded-sequence')
     implementation project(':third-party:commons-codec')
-    implementation project(':third-party:parquet-floor')
     testImplementation project(':code:services-application:search-service')
 
     implementation project(':code:processes:crawling-process:model')
@@ -60,10 +59,13 @@ dependencies {
     testImplementation libs.mockito
 
     testImplementation libs.bundles.selenium
-    testImplementation platform('org.testcontainers:testcontainers-bom:1.17.4')
+    testImplementation platform('org.testcontainers:testcontainers-bom:1.21.4') {
+        exclude group: 'org.apache.commons'
+    }
+    testImplementation libs.commons.compress
     testImplementation libs.commons.codec
-    testImplementation 'org.testcontainers:mariadb:1.17.4'
-    testImplementation 'org.testcontainers:junit-jupiter:1.17.4'
+    testImplementation 'org.testcontainers:mariadb:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
     testImplementation project(':code:libraries:test-helpers')
 }
 
