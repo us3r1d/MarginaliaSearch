@@ -24,6 +24,12 @@ tasks.register('fastTests', Test) {
     }
 }
 
+tasks.withType(Test).configureEach {
+    // Back scratch allocator slabs with collectable arenas, so that tests that create
+    // allocator factories do not accumulate permanent global arena allocations
+    systemProperty 'system.scratchAllocatorAutoArena', 'true'
+}
+
 if (project.plugins.hasPlugin('application')) {
     if (!application.mainClass.isPresent() || !application.applicationName.endsWith("-service")) {
         tasks.shadowJar.enabled = false
@@ -33,6 +39,10 @@ if (project.plugins.hasPlugin('application')) {
 
 
     shadowJar {
+        // Service providers must reach the transformer before duplicate entries are removed.
+        filesMatching(['META-INF/services/**', 'META-INF/*.kotlin_module']) {
+            duplicatesStrategy = DuplicatesStrategy.INCLUDE
+        }
         mergeServiceFiles()
 
         archiveBaseName = application.applicationName
@@ -56,6 +66,9 @@ if (project.plugins.hasPlugin('application')) {
 }
 
 dependencies {
+    testImplementation platform(libs.junit.bom)
+    // Keep Jackson modules pulled in by test tools on the same release.
+    testImplementation platform(libs.jackson.bom)
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 sourceSets {
@@ -63,8 +76,8 @@ sourceSets {
         java {
             srcDirs = [
                     'java',
-                    'build/generated/source/proto/main/grpc',
-                    'build/generated/source/proto/main/java'
+                    'build/generated/sources/proto/main/grpc',
+                    'build/generated/sources/proto/main/java'
                     ]
         }
         resources {

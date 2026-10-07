@@ -4,9 +4,13 @@ import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import nu.marginalia.array.LongArray;
 import nu.marginalia.array.LongArrayFactory;
 import nu.marginalia.ffi.LinuxSystemCalls;
+import nu.marginalia.index.config.ForwardIndexParameters;
+import nu.marginalia.index.forward.doctext.DocTextDecoder;
+import nu.marginalia.index.forward.doctext.DocTextsReader;
 import nu.marginalia.index.forward.spans.DecodableDocumentSpans;
 import nu.marginalia.index.forward.spans.SpansCodec;
-import nu.marginalia.index.searchset.DomainRankings;
+import nu.marginalia.index.model.FeaturesCodec;
+import nu.marginalia.ranking.DomainRankings;
 import nu.marginalia.model.id.UrlIdCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,8 +19,11 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.SegmentAllocator;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
 import static nu.marginalia.index.config.ForwardIndexParameters.*;
 
@@ -37,19 +44,38 @@ public class ForwardIndexReader {
 
     private final DomainRankings domainRankings;
 
+    private final int dataFd;
     private final int spansFd;
+
+    private final DocTextsReader docTextsReader;
+
+    private final int entrySize;
+
+    /** Mapping of the spans file, for fetch paths that read resident pages
+     *  directly instead of copying them through the fds above */
+    private final Arena spansArena;
+    private final MemorySegment spansSegment;
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
+    private final ForwardIndexVersion version;
+
     public ForwardIndexReader(Path idsFile,
                               Path dataFile,
-                              Path spansFile) throws IOException {
+                              Path spansFile,
+                              Path docTextsFile) throws IOException {
         if (!Files.exists(dataFile)) {
             logger.warn("Failed to create ForwardIndexReader, {} is absent", dataFile);
             ids = null;
             data = null;
             domainRankings = null;
+            dataFd = -1;
             spansFd = -1;
+            spansArena = null;
+            spansSegment = null;
+            docTextsReader = null;
+            entrySize = 0;
+            version = null;
             return;
         }
         else if (!Files.exists(idsFile)) {
@@ -57,7 +83,13 @@ public class ForwardIndexReader {
             ids = null;
             data = null;
             domainRankings = null;
+            dataFd = -1;
             spansFd = -1;
+            spansArena = null;
+            spansSegment = null;
+            docTextsReader = null;
+            entrySize = 0;
+            version = null;
             return;
         }
         else if (!Files.exists(spansFile)) {
@@ -65,23 +97,50 @@ public class ForwardIndexReader {
             ids = null;
             data = null;
             domainRankings = null;
+            dataFd = -1;
             spansFd = -1;
+            spansArena = null;
+            spansSegment = null;
+            docTextsReader = null;
+            entrySize = 0;
+            version = null;
             return;
         }
-
-        logger.info("Switching forward index");
 
         ids = loadIds(idsFile);
         data = loadData(dataFile);
 
+        version = ForwardIndexParameters.decodeVersion(data.get(data.size() - 1));
+        entrySize = version.entrySize;
+
+        logger.info("Switching forward index, version {}", version);
+
+        if (version.compareTo(ForwardIndexVersion.V2026_08__1) >= 0 && Files.exists(docTextsFile)) {
+            docTextsReader = new DocTextsReader(docTextsFile);
+        }
+        else {
+            logger.warn("Document texts are not available, snippets will not be generated");
+            docTextsReader = null;
+        }
+
         domainRankings = new DomainRankings();
         domainRankings.load(dataFile.getParent());
 
-        LinuxSystemCalls.madviseRandom(data.getMemorySegment());
+        LinuxSystemCalls.madviseNormal(data.getMemorySegment());
         LinuxSystemCalls.madviseRandom(ids.getMemorySegment());
+
+        dataFd = LinuxSystemCalls.openBuffered(dataFile);
+        LinuxSystemCalls.fadviseRandom(dataFd);
 
         spansFd = LinuxSystemCalls.openBuffered(spansFile);
         LinuxSystemCalls.fadviseWillneed(spansFd);
+        LinuxSystemCalls.fadviseRandom(spansFd);
+
+        spansArena = Arena.ofShared();
+        try (FileChannel channel = FileChannel.open(spansFile, StandardOpenOption.READ)) {
+            spansSegment = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size(), spansArena);
+        }
+        LinuxSystemCalls.madviseNormal(spansSegment);
 
         Thread.ofPlatform().start(this::createIdsMap);
     }
@@ -128,21 +187,31 @@ public class ForwardIndexReader {
         long offset = idxForDoc(combinedDocId);
         if (offset < 0) return 0;
 
-        return data.get(ENTRY_SIZE * offset + METADATA_OFFSET);
+        return data.get(entrySize * offset + METADATA_OFFSET);
     }
 
     public int getHtmlFeatures(long combinedDocId) {
         long offset = idxForDoc(combinedDocId);
         if (offset < 0) return 0;
 
-        return (int) (data.get(ENTRY_SIZE * offset + FEATURES_OFFSET) & 0xFFFF_FFFFL);
+        long encoded = data.get(entrySize * offset + FEATURES_OFFSET);
+        return FeaturesCodec.getHtmlFeatures(encoded);
     }
 
     public int getDocumentSize(long combinedDocId) {
         long offset = idxForDoc(combinedDocId);
         if (offset < 0) return 0;
 
-        return (int) (data.get(ENTRY_SIZE * offset + FEATURES_OFFSET) >>> 32L);
+        long encoded = data.get(entrySize * offset + FEATURES_OFFSET);
+        return FeaturesCodec.getDocumentSize(encoded, version);
+    }
+
+    public int getDocPubDate(long combinedDocId) {
+        long offset = idxForDoc(combinedDocId);
+        if (offset < 0) return 0;
+
+        long encoded = data.get(entrySize * offset + FEATURES_OFFSET);
+        return FeaturesCodec.getPubDate(encoded, version);
     }
 
 
@@ -179,36 +248,112 @@ public class ForwardIndexReader {
     }
 
     @Nullable
-    public DecodableDocumentSpans getDocumentSpans(Arena arena, long documentId) {
+    public DecodableDocumentSpans getDocumentSpans(SegmentAllocator allocator, long documentId) {
 
         long fwdIdxOffset = idxForDoc(documentId);
         if (fwdIdxOffset < 0) {
             return null;
         }
 
-        long encodedOffset = data.get(ENTRY_SIZE * fwdIdxOffset + SPANS_OFFSET);
+        long encodedOffset = data.get(entrySize * fwdIdxOffset + SPANS_OFFSET);
 
         long readOffset = SpansCodec.decodeStartOffset(encodedOffset);
         int readSize = SpansCodec.decodeSize(encodedOffset);
 
-        MemorySegment segment = arena.allocate(readSize, 8);
+        MemorySegment segment = allocator.allocate(readSize, 8);
 
         LinuxSystemCalls.readAt(spansFd, segment, readOffset);
 
         return new DecodableDocumentSpans(segment);
     }
 
+    /** Returns the document text stored for the given document, or null
+     * if no text is stored for it or the stored blob cannot be read */
+    @Nullable
+    public String getDocumentText(DocTextDecoder decoder, long documentId) {
+        if (docTextsReader == null) {
+            return null;
+        }
+
+        long fwdIdxOffset = idxForDoc(documentId);
+        if (fwdIdxOffset < 0) {
+            return null;
+        }
+
+        return docTextsReader.read(decoder, data.get(entrySize * fwdIdxOffset + DOC_TEXT_OFFSET));
+    }
+
     public int totalDocCount() {
         return (int) ids.size();
     }
 
+    /** True when the in-memory id lookup table has finished building.  Until then
+     *  lookups fall back to a binary search over the mmapped ids file. */
+    public boolean isIdsMapReady() {
+        return idsMap != null;
+    }
+
+    /** Byte offset of the document's entry in the data file, or -1 if the
+     *  document is not in the index */
+    public long dataOffsetForDoc(long combinedDocId) {
+        long idx = idxForDoc(combinedDocId);
+        if (idx < 0) {
+            return -1;
+        }
+        return 8L * entrySize * idx;
+    }
+
+    public int dataFd() {
+        return dataFd;
+    }
+
+    public int spansFd() {
+        return spansFd;
+    }
+
+    public MemorySegment mappedData() {
+        return data.getMemorySegment();
+    }
+
+    public MemorySegment mappedSpans() {
+        return spansSegment;
+    }
+
+    public ForwardIndexVersion version() {
+        return version;
+    }
+
     public void close() {
+        try {
+            if (dataFd >= 0)
+                LinuxSystemCalls.closeFd(dataFd);
+        }
+        catch (RuntimeException ex) {
+            logger.error("Error closing 'dataFd'", ex);
+        }
+
         try {
             if (spansFd >= 0)
                 LinuxSystemCalls.closeFd(spansFd);
         }
         catch (RuntimeException ex) {
             logger.error("Error closing 'spansFd'", ex);
+        }
+
+        try {
+            if (spansArena != null)
+                spansArena.close();
+        }
+        catch (RuntimeException ex) {
+            logger.error("Error closing 'spansArena'", ex);
+        }
+
+        try {
+            if (docTextsReader != null)
+                docTextsReader.close();
+        }
+        catch (IOException | RuntimeException ex) {
+            logger.error("Error closing 'docTextsReader'", ex);
         }
 
         try {

@@ -9,6 +9,7 @@ import nu.marginalia.actor.state.ActorResumeBehavior;
 import nu.marginalia.actor.state.ActorStep;
 import nu.marginalia.actor.state.Resume;
 import nu.marginalia.actor.state.Terminal;
+import nu.marginalia.mq.MqMessage;
 import nu.marginalia.mq.MqMessageState;
 import nu.marginalia.mq.persistence.MqMessageHandlerRegistry;
 import nu.marginalia.mq.persistence.MqPersistence;
@@ -23,6 +24,7 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
 import java.time.*;
+import java.util.EnumSet;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -77,15 +79,14 @@ public class PingMonitorActor extends RecordActorPrototype {
                 for (;;) {
                     var messages = persistence.eavesdrop(inboxName, 1);
 
-                    if (messages.isEmpty() && !processSpawnerService.isRunning(processId)) {
+                    if (messages.isEmpty()) {
+                        if (!processSpawnerService.isRunning(processId)) {
+                            yield new Wait(nextTimeslot());
+                        }
+
                         synchronized (processId) {
                             processId.wait(5000);
                         }
-
-                        if (errorAttempts > 0) { // Reset the error counter if there is silence in the inbox
-                            yield new Monitor(0);
-                        }
-                        // else continue
                     } else {
                         // Special: Associate this thread with the message so that we can get tracking
                         MqMessageHandlerRegistry.register(messages.getFirst().msgId());
@@ -133,6 +134,13 @@ public class PingMonitorActor extends RecordActorPrototype {
 
                 Thread.sleep(Duration.between(Instant.now(), start));
 
+                // If the process is already running, we don't need to do anything and can skip to Monitor
+                if (processSpawnerService.isRunning(processId)) {
+                    yield new Monitor(0);
+                }
+
+                cleanOldRequests();
+
                 PingRequest request = new PingRequest(end);
                 persistence.sendNewMessage(inboxName, null, null,
                         "PingRequest",
@@ -163,6 +171,15 @@ public class PingMonitorActor extends RecordActorPrototype {
         this.scheduleService = scheduleService;
         this.inboxName = ProcessInboxNames.PING_INBOX + ":" + node;
         this.processId = ProcessSpawnerService.ProcessId.PING;
+    }
+
+    private void cleanOldRequests() throws SQLException {
+        var messages = persistence.eavesdrop(inboxName, 32);
+
+        for (var message: messages) { // state = ACK, NEW implicitly
+            logger.info("Flagging stale ping request {} as dead", message.msgId());
+            persistence.updateMessageState(message.msgId(), MqMessageState.DEAD);
+        }
     }
 
     /** Sets the message to dead in the database to avoid

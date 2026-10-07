@@ -12,7 +12,7 @@ import nu.marginalia.search.JteRenderer;
 import nu.marginalia.search.ScrapeStopperInterceptor;
 import nu.marginalia.search.SearchOperator;
 import nu.marginalia.search.model.NavbarModel;
-import nu.marginalia.search.model.SimpleSearchResults;
+import nu.marginalia.search.model.UnrankedSearchResults;
 import nu.marginalia.search.model.UrlDetails;
 import nu.marginalia.service.server.RateLimiter;
 import org.apache.commons.lang3.StringUtils;
@@ -47,7 +47,9 @@ public class SearchCrosstalkService {
     @GET
     @Path("/crosstalk")
     public ModelAndView<?> crosstalk(Context context,
-                                     @QueryParam String domains
+                                     @QueryParam String domains,
+                                     @QueryParam String cursorA,
+                                     @QueryParam String cursorB
                                      ) throws SQLException, TimeoutException {
 
         var interceptResult = scrapeStopperInterceptor.intercept("CT", domains, rateLimiter, context);
@@ -55,7 +57,7 @@ public class SearchCrosstalkService {
         if (interceptResult instanceof ScrapeStopperInterceptor.InterceptRedirect redir) {
             return new MapModelAndView("siteinfo/ctwait.jte",
                     Map.of("model",
-                            new CrosstalkWait(domains, redir.sst(), redir.waitTime()),
+                            new CrosstalkWait(domains, redir.sst(), redir.waitTime(), redir.redirUrl()),
                             "navbar", NavbarModel.SITEINFO)
             );
         }
@@ -73,10 +75,14 @@ public class SearchCrosstalkService {
             parts[i] = parts[i].trim();
         }
 
-        SimpleSearchResults resAtoB = searchOperator.doLinkSearch(parts[0], parts[1]);
-        SimpleSearchResults resBtoA = searchOperator.doLinkSearch(parts[1], parts[0]);
+        UnrankedSearchResults resAtoB = searchOperator.doLinkSearch(context, parts[0], parts[1], cursorA);
+        UnrankedSearchResults resBtoA = searchOperator.doLinkSearch(context, parts[1], parts[0], cursorB);
 
-        CrosstalkResult model = new CrosstalkResult(parts[0], parts[1], resAtoB.results, resBtoA.results);
+        CrosstalkResult model = new CrosstalkResult(
+                interceptResult.sst(),
+                parts[0], parts[1],
+                resAtoB.results, resBtoA.results,
+                resAtoB.cursor, resBtoA.cursor);
 
         return new MapModelAndView(
                 "siteinfo/crosstalk.jte",
@@ -86,10 +92,13 @@ public class SearchCrosstalkService {
 
 
 
-    public record CrosstalkResult(String domainA,
+    public record CrosstalkResult(String sst,
+                                   String domainA,
                                    String domainB,
                                    List<UrlDetails> aToB,
-                                   List<UrlDetails> bToA)
+                                   List<UrlDetails> bToA,
+                                   String cursorNextA,
+                                   String cursorNextB)
     {
 
         public boolean hasBoth() {
@@ -101,11 +110,22 @@ public class SearchCrosstalkService {
         public boolean hasB() {
             return !bToA.isEmpty();
         }
+        public boolean hasNext() {
+            return (!"FIN".equals(cursorNextA) && !aToB.isEmpty())
+                || (!"FIN".equals(cursorNextB) && !bToA.isEmpty());
+        }
+        public String nextUrl() {
+            return "?domains=" + domainA + "," + domainB
+                    + "&cursorA=" + cursorNextA
+                    + "&cursorB=" + cursorNextB
+                    + "&sst=" + sst;
+        }
     }
 
     public record CrosstalkWait(String domains,
                                 String sst,
-                                Duration waitTime)
+                                Duration waitTime,
+                                String redirUrl)
     {
         public String domainA() {
             return domains.split(",")[0];
@@ -113,10 +133,6 @@ public class SearchCrosstalkService {
 
         public String domainB() {
             return domains.split(",")[1];
-        }
-
-        public String redirUrl() {
-            return String.format("?domains=%s&sst=%s", domains,sst);
         }
     }
 }

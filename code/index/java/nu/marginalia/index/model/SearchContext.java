@@ -5,12 +5,10 @@ import it.unimi.dsi.fastutil.floats.FloatList;
 import it.unimi.dsi.fastutil.ints.*;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
-import it.unimi.dsi.fastutil.longs.LongComparator;
 import it.unimi.dsi.fastutil.longs.LongList;
 import nu.marginalia.api.searchquery.*;
 import nu.marginalia.api.searchquery.model.compiled.CompiledQuery;
 import nu.marginalia.api.searchquery.model.compiled.CompiledQueryLong;
-import nu.marginalia.api.searchquery.model.compiled.CompiledQueryParser;
 import nu.marginalia.api.searchquery.model.compiled.CqDataInt;
 import nu.marginalia.api.searchquery.model.query.QueryStrategy;
 import nu.marginalia.api.searchquery.model.query.SpecificationLimit;
@@ -18,8 +16,8 @@ import nu.marginalia.api.searchquery.model.results.PrototypeRankingParameters;
 import nu.marginalia.index.CombinedIndexReader;
 import nu.marginalia.index.reverse.IndexLanguageContext;
 import nu.marginalia.index.reverse.query.IndexSearchBudget;
-import nu.marginalia.index.searchset.SearchSet;
-import nu.marginalia.index.searchset.connectivity.ConnectivityView;
+import nu.marginalia.ranking.set.SearchSet;
+import nu.marginalia.ranking.connectivity.ConnectivityView;
 import nu.marginalia.language.keywords.KeywordHasher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -83,12 +81,14 @@ public class SearchContext {
 
     public final ConnectivityView connectivityView;
 
+    public final int nodeId;
+
     public static SearchContext create(CombinedIndexReader currentIndex,
+                                       int nodeId,
                                        KeywordHasher keywordHasher,
                                        RpcIndexQuery request,
                                        SearchSet searchSet,
-                                       ConnectivityView connectivityView
-                                       ) {
+                                       ConnectivityView connectivityView) {
 
         var limits = request.getQueryLimits();
         var queryTerms = request.getTerms();
@@ -104,11 +104,11 @@ public class SearchContext {
         var rankingParams = request.hasParameters() ? request.getParameters() : PrototypeRankingParameters.sensibleDefaults();
 
         return new SearchContext(
+                nodeId,
                 keywordHasher,
                 connectivityView,
                 request.getLangIsoCode(),
                 currentIndex,
-                queryTerms.getCompiledQuery(),
                 queryParams,
                 queryTerms,
                 rankingParams,
@@ -119,11 +119,11 @@ public class SearchContext {
     }
 
     public SearchContext(
+            int nodeId,
             KeywordHasher keywordHasher,
             ConnectivityView connectivityView,
             String langIsoCode,
             CombinedIndexReader currentIndex,
-            String queryExpression,
             QueryParams queryParams,
             RpcQueryTerms query,
             RpcResultRankingParameters rankingParams,
@@ -132,6 +132,7 @@ public class SearchContext {
             List<Float> priorityDomainIdsAmountsList,
             RpcQueryLimits limits)
     {
+        this.nodeId = nodeId;
         this.connectivityView = connectivityView;
         this.docCount = currentIndex.totalDocCount();
         this.languageContext = currentIndex.createLanguageContext(langIsoCode);
@@ -156,7 +157,7 @@ public class SearchContext {
         this.limitByDomain = limits.getResultsByDomain();
         this.limitTotal = limits.getResultsTotal();
 
-        this.compiledQuery = CompiledQueryParser.parse(queryExpression);
+        this.compiledQuery = IndexProtobufCodec.convertCompiledQuery(query.getCompiledQuery());
         this.compiledQueryIds = compiledQuery.mapToLong(keywordHasher::hashKeyword);
         int[] full = new int[compiledQueryIds.size()];
         int[] prio = new int[compiledQueryIds.size()];
@@ -176,6 +177,8 @@ public class SearchContext {
                 regularMask.set(idx);
             }
         }
+
+        harmonizeVariantTermFrequencies(compiledQuery.variantClasses, full);
 
         this.fullCounts = new CqDataInt(full);
         this.priorityCounts = new CqDataInt(prio);
@@ -259,14 +262,26 @@ public class SearchContext {
         this.phraseConstraints = new PhraseConstraintGroupList(constraintsFull, constraintsMandatory, constraintsOptional);
     }
 
-    public int termFreqDocCount() {
-        return docCount;
+    /** The query factory creates multiple subqueries, with alternative words for some parts of the query,
+     * e.g. by pluralizing a word or adding a hyphen between adjacent words.  Since these alternatives
+     * are often more or less common than the original term, they can skew the BM25 calculation.  We thus
+     * count them as instances of the original word.
+     * */
+    public static void harmonizeVariantTermFrequencies(int[] classes, int[] frequencies) {
+        int[] max = new int[frequencies.length];
+
+        for (int i = 0; i < frequencies.length; i++) {
+            int variantClass = classes[i];
+            max[variantClass] = Math.max(max[variantClass], frequencies[i]);
+        }
+
+        for (int i = 0; i < frequencies.length; i++) {
+            frequencies[i] = max[classes[i]];
+        }
     }
 
-    public long[] sortedDistinctIncludes(LongComparator comparator) {
-        LongList list = new LongArrayList(compiledQueryIds.copyData());
-        list.sort(comparator);
-        return list.toLongArray();
+    public int termFreqDocCount() {
+        return docCount;
     }
 
 }

@@ -12,11 +12,13 @@ java {
 apply from: "$rootProject.projectDir/srcsets.gradle"
 
 dependencies {
+    compileOnly libs.jsr305
     implementation project(':code:common:model')
     implementation project(':code:common:config')
     implementation project(':code:common:service')
     implementation project(':code:common:db')
     implementation project(':code:libraries:message-queue')
+    implementation project(':code:processes:process-mq-api')
     implementation project(':code:functions:nsfw-filter')
     implementation project(':code:functions:search-query:api')
 
@@ -30,9 +32,9 @@ dependencies {
     }
     implementation libs.bundles.protobuf
     implementation libs.fastutil
+    implementation libs.commons.lang3
     implementation libs.javax.annotation
     implementation libs.bundles.gson
-    implementation libs.guava
     libs.bundles.grpc.get().each {
         implementation dependencies.create(it) {
             exclude group: 'com.google.guava'

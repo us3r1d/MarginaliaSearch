@@ -1,6 +1,14 @@
 package nu.marginalia.service.server;
 
+import gg.jte.ContentType;
+import gg.jte.TemplateEngine;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.jooby.*;
+import io.jooby.exception.MethodNotAllowedException;
+import io.jooby.exception.MissingValueException;
+import io.jooby.exception.NotFoundException;
+import io.jooby.handler.AssetSource;
 import io.jooby.jte.JteModule;
 import io.jooby.netty.NettyServer;
 import io.prometheus.metrics.core.metrics.Counter;
@@ -17,6 +25,7 @@ import org.slf4j.Marker;
 import org.slf4j.MarkerFactory;
 
 import java.io.IOException;
+import java.nio.charset.MalformedInputException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -142,13 +151,8 @@ public class JoobyService {
                 restEndpoint.port(),
                 config.externalAddress());
 
-        // FIXME:  This won't work outside of docker, may need to submit a PR to jooby to allow classpaths here
-        if (Files.exists(Path.of("/app/resources/jte")) || Files.exists(Path.of("/app/classes"))) {
-            jooby.install(new JteModule(Path.of("/app/resources/jte"), Path.of("/app/classes")));
-        }
-        if (Files.exists(Path.of("/app/resources/static"))) {
-            jooby.assets("/*", Paths.get("/app/resources/static"));
-        }
+        configureStaticResources(jooby);
+        configureErrorHandling(jooby);
 
         jooby.get("/internal/ping", ctx -> "pong");
         jooby.get("/internal/started", this::isInitialized);
@@ -160,6 +164,80 @@ public class JoobyService {
 
         jooby.before(this::auditRequestIn);
         jooby.after(this::auditRequestOut);
+    }
+
+    public static void configureErrorHandling(Jooby jooby) {
+        jooby.error(MalformedInputException.class, (ctx, cause, code) -> {
+            ctx.setResponseCode(StatusCode.BAD_REQUEST);
+            ctx.setResponseType(MediaType.TEXT);
+            ctx.send("Bad request");
+        });
+
+        jooby.error(MethodNotAllowedException.class, (ctx, cause, code) -> {
+            ctx.setResponseCode(StatusCode.METHOD_NOT_ALLOWED);
+            ctx.setResponseType(MediaType.TEXT);
+            ctx.send("Method not allowed");
+        });
+
+        jooby.error(MissingValueException.class, (ctx, cause, code) -> {
+            ctx.setResponseCode(StatusCode.BAD_REQUEST);
+            ctx.setResponseType(MediaType.TEXT);
+            ctx.send("Bad request\n" + cause.getMessage());
+        });
+
+        jooby.error(NotFoundException.class, (ctx, cause, code) -> {
+            ctx.setResponseCode(StatusCode.NOT_FOUND);
+            ctx.setResponseType(MediaType.TEXT);
+            ctx.send("Not found");
+        });
+
+        jooby.error(StatusRuntimeException.class, (ctx, cause, code) -> {
+            var sre = (StatusRuntimeException) cause;
+
+            switch (sre.getStatus().getCode()) {
+                case Status.Code.RESOURCE_EXHAUSTED -> {
+                    ctx.setResponseCode(StatusCode.FAILED_DEPENDENCY);
+                    ctx.setResponseType(MediaType.TEXT);
+                    ctx.send("Service overloaded");
+                }
+                case Status.Code.UNAVAILABLE -> {
+                    ctx.setResponseCode(StatusCode.SERVICE_UNAVAILABLE);
+                    ctx.setResponseType(MediaType.TEXT);
+                    ctx.send("Service unavailable");
+                }
+                case Status.Code.FAILED_PRECONDITION -> {
+                    ctx.setResponseCode(StatusCode.BAD_REQUEST);
+                    ctx.setResponseType(MediaType.TEXT);
+                    ctx.send("Bad request");
+                }
+                default -> {
+                    ctx.setResponseCode(StatusCode.SERVER_ERROR);
+                    ctx.setResponseType(MediaType.TEXT);
+                    ctx.send("Server error");
+                }
+            }
+        });
+    }
+
+    /** Set up serving of jte templates and static resources.  In docker, the jib image build
+     * exposes an exploded directory layout under /app, and the files are served directly off
+     * the filesystem.  Outside of docker, the templates are precompiled into the service jar
+     * by the jte gradle plugin, and the static files are served from the classpath.
+     */
+    public static void configureStaticResources(Jooby jooby) {
+        if (Files.exists(Path.of("/app/resources/jte")) || Files.exists(Path.of("/app/classes"))) {
+            jooby.install(new JteModule(Path.of("/app/resources/jte"), Path.of("/app/classes")));
+        }
+        else if (JoobyService.class.getResource("/gg/jte/generated/precompiled") != null) {
+            jooby.install(new JteModule(TemplateEngine.createPrecompiled(ContentType.Html)));
+        }
+
+        if (Files.exists(Path.of("/app/resources/static"))) {
+            jooby.assets("/*", Paths.get("/app/resources/static"));
+        }
+        else if (JoobyService.class.getResource("/static") != null) {
+            jooby.assets("/*", AssetSource.create(JoobyService.class.getClassLoader(), "/static"));
+        }
     }
 
     private Object isInitialized(Context ctx) {
@@ -199,7 +277,6 @@ public class JoobyService {
         }
 
         if (failure != null) {
-            logger.error("Request failed " + ctx.getMethod() + " " + ctx.getRequestURL(), failure);
             request_counter_err.labelValues(serviceName, Integer.toString(node)).inc();
         }
     }

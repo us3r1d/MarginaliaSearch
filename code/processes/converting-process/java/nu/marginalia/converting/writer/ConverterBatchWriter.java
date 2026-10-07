@@ -20,6 +20,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
@@ -30,6 +31,8 @@ public class ConverterBatchWriter implements AutoCloseable, ConverterBatchWriter
     private final SlopDocumentRecord.Writer documentWriter;
 
     private int ordinalOffset = 0;
+
+    private static final byte[] EMPTY_DOCUMENT_TEXT = new byte[0];
 
     private static final Logger logger = LoggerFactory.getLogger(ConverterBatchWriter.class);
 
@@ -103,7 +106,17 @@ public class ConverterBatchWriter implements AutoCloseable, ConverterBatchWriter
                 continue;
             }
 
-            DocumentKeywords wb = document.words.build();
+            DocumentKeywords wb;
+            try {
+                wb = document.words.build();
+            }
+            catch (Exception e) {
+                // Better to drop the document than to abort the whole batch
+                logger.warn("Failed to encode keyword data for {}", document.url, e);
+                continue;
+            }
+
+            byte[] documentTextZstd = Objects.requireNonNullElse(document.details.documentTextZstd, EMPTY_DOCUMENT_TEXT);
 
             documentWriter.write(new SlopDocumentRecord(
                     domainName,
@@ -112,7 +125,7 @@ public class ConverterBatchWriter implements AutoCloseable, ConverterBatchWriter
                     document.state.toString(),
                     document.stateReason,
                     document.details.title,
-                    document.details.description,
+                    documentTextZstd,
                     HtmlFeature.encode(document.details.features),
                     document.details.format.name(),
                     document.details.length,
@@ -121,6 +134,7 @@ public class ConverterBatchWriter implements AutoCloseable, ConverterBatchWriter
                     document.details.metadata.encode(),
                     document.details.languageIsoCode,
                     document.details.pubYear,
+                    document.details.pubDate,
                     wb.keywords(),
                     wb.metadata(),
                     wb.positions(),

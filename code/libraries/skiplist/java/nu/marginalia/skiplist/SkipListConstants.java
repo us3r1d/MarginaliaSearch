@@ -6,6 +6,10 @@ import nu.marginalia.skiplist.compression.input.CompressorInput;
 public class SkipListConstants {
     public static final int BLOCK_SIZE = Integer.getInteger("index.documentsSkipListBlockSize", 8192);
 
+    /** Values are written in blocks of this size, and read a whole block at a
+     *  time since a block usually holds several of the records being read */
+    public static final int VALUE_BLOCK_SIZE = 4096;
+
     static final int DATA_BLOCK_HEADER_SIZE = 16;
 
     static final int RECORD_SIZE = 3;
@@ -19,22 +23,16 @@ public class SkipListConstants {
     static final byte FLAG_FOOTER_BLOCK = 1<<3;
     static final byte FLAG_COMPRESSED_BLOCK = 1<<4;
 
-    static int skipOffsetForPointer(int pointerIdx) {
-        final int linearPart = 16;
-        if (pointerIdx <= linearPart) {
-            return pointerIdx + 1;
-        }
-        return linearPart + ((pointerIdx - linearPart - 1) * (pointerIdx - linearPart - 1));
-    }
-
-
-    static int numPointersForRootBlock(int rootBlockSize, StaggeredCompressorInput compressorInput) {
+    static int numPointersForRootBlock(int rootBlockSize,
+                                       StaggeredCompressorInput compressorInput,
+                                       SkipListFormat format)
+    {
         int numBlocks = estimateNumBlocks(compressorInput);
         int fp;
 
         for (fp = 0; fp <= POINTER_TARGET_COUNT;fp++) {
             if (rootBlockCapacity(rootBlockSize, fp, compressorInput) <= 0
-             || skipOffsetForPointer(fp) >= numBlocks)
+             || format.skipOffsetForPointer(fp) >= numBlocks)
                 break;
         }
 
@@ -47,10 +45,13 @@ public class SkipListConstants {
                 (rootBlockSize - DATA_BLOCK_HEADER_SIZE - 8 * pointerCount));
     }
 
-    static int rootBlockCapacity(int rootBlockSize, StaggeredCompressorInput input) {
+    static int rootBlockCapacity(int rootBlockSize,
+                                 StaggeredCompressorInput input,
+                                 SkipListFormat format)
+    {
 
         return rootBlockCapacity(rootBlockSize,
-                numPointersForRootBlock(rootBlockSize, input),
+                numPointersForRootBlock(rootBlockSize, input, format),
                 input);
     }
 

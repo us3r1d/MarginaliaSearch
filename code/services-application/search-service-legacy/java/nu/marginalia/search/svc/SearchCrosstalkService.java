@@ -10,8 +10,7 @@ import nu.marginalia.service.server.RateLimiter;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import spark.Request;
-import spark.Response;
+import io.jooby.Context;
 
 import java.io.IOException;
 import java.sql.SQLException;
@@ -36,10 +35,10 @@ public class SearchCrosstalkService {
         this.renderer = rendererFactory.renderer("search/site-info/site-crosstalk");
     }
 
-    public Object handle(Request request, Response response) throws SQLException, TimeoutException {
-        String domains = request.queryParams("domains");
+    public Object handle(Context ctx) throws SQLException, TimeoutException {
+        String domains = ctx.query("domains").valueOrNull();
 
-        var intercept = scrapeStopperInterceptor.intercept("CT", domains, rateLimiter, request, response);
+        var intercept = scrapeStopperInterceptor.intercept("CT", domains, rateLimiter, ctx);
         if (intercept instanceof ScrapeStopperInterceptor.InterceptRedirect redir)
             return redir.result();
 
@@ -50,16 +49,22 @@ public class SearchCrosstalkService {
             throw new IllegalArgumentException("Expected exactly two domains");
         }
 
-        response.type("text/html");
+        ctx.setResponseType("text/html");
 
         for (int i = 0; i < parts.length; i++) {
             parts[i] = parts[i].trim();
         }
 
-        var resAtoB = searchOperator.doLinkSearch(parts[0], parts[1]);
-        var resBtoA = searchOperator.doLinkSearch(parts[1], parts[0]);
+        String cursorA = ctx.query("cursorA").value("");
+        String cursorB = ctx.query("cursorB").value("");
 
-        var model = new CrosstalkResult(intercept.sst(), parts[0], parts[1], resAtoB, resBtoA);
+        var resAtoB = searchOperator.doLinkSearch(parts[0], parts[1], cursorA);
+        var resBtoA = searchOperator.doLinkSearch(parts[1], parts[0], cursorB);
+
+        var model = new CrosstalkResult(intercept.sst(),
+                parts[0], parts[1],
+                resAtoB.results, resBtoA.results,
+                resAtoB.cursor, resBtoA.cursor);
 
         return renderer.render(model);
     }
@@ -70,7 +75,9 @@ public class SearchCrosstalkService {
                                    String domainA,
                                    String domainB,
                                    List<UrlDetails> forward,
-                                   List<UrlDetails> backward)
+                                   List<UrlDetails> backward,
+                                   String cursorNextA,
+                                   String cursorNextB)
     {
 
         public boolean isFocusDomain() {
@@ -78,6 +85,10 @@ public class SearchCrosstalkService {
         }
         public boolean hasBoth() {
             return !forward.isEmpty() && !backward.isEmpty();
+        }
+        public boolean hasNext() {
+            return (!"FIN".equals(cursorNextA) && !forward.isEmpty())
+                || (!"FIN".equals(cursorNextB) && !backward.isEmpty());
         }
 
     }

@@ -1,12 +1,12 @@
 plugins {
     id 'java'
-    id("org.jetbrains.gradle.plugin.idea-ext") version "1.0"
+    id("org.jetbrains.gradle.plugin.idea-ext") version "1.4.1"
     id "me.champeau.jmh" version "0.7.3"
-    id 'com.gradleup.shadow' version "9.2.2"
+    id 'com.gradleup.shadow' version "9.6.1"
 
     // This is a workaround for a bug in the Jib plugin that causes it to stall randomly
     // https://github.com/GoogleContainerTools/jib/issues/3347
-    id 'com.google.cloud.tools.jib' version '3.4.5' apply(false)
+    id 'com.google.cloud.tools.jib' version '3.5.4' apply(false)
     id 'com.adarshr.test-logger' version '4.0.0'
 }
 
@@ -32,6 +32,15 @@ subprojects.forEach {it ->
     it.tasks.withType(JavaExec).configureEach {
         jvmArgs += ['--enable-preview']
     }
+
+    it.plugins.withId('application') { _ ->
+        it.application.applicationDefaultJvmArgs = [
+                '--enable-preview',
+                '--enable-native-access=ALL-UNNAMED',
+                '--sun-misc-unsafe-memory-access=allow'
+        ]
+    }
+
     it.tasks.withType(Test).configureEach {
         jvmArgs += ['--enable-preview',
                     '--enable-native-access=ALL-UNNAMED',
@@ -45,34 +54,22 @@ subprojects.forEach {it ->
         reproducibleFileOrder = true
     }
 
-    // Kludge:  Fix netty compatibility
-    it.configurations.all {
-        resolutionStrategy.eachDependency { details ->
-            if (details.requested.group == 'io.netty'
-                    && details.requested.name != 'netty-tcnative-boringssl-static') {
-                details.useVersion '4.2.12.Final'
-            }
-        }
+    it.plugins.withId('java') { _ ->
+        it.dependencies.add('implementation', it.dependencies.platform('io.netty:netty-bom:4.2.18.Final'))
     }
 
 }
 
 ext {
-    jvmVersion = 25
-    dockerImageBase='container-registry.oracle.com/graalvm/jdk:25'
-
-    // If you're e.g. using arch, which is on JDK 26 (or whatever is latest), please use these instead:
-
-//    jvmVersion = 26
-//    dockerImageBase='amazoncorretto:26.0.0'
-
-    // (this is usually not a problem you have with Java, which is absurdly backward- and forward-compatible,
-    //  but gradle is certainly one of the build systems of all time)
+    jvmVersion = 26
+    dockerImageBase='amazoncorretto:26.0.0@sha256:6ea266d64d1995d81834934a070fe185331d5d1659baf464896b02db651d227c'
 
     dockerImageTag='latest'
     dockerImageRegistry='marginalia'
-    jibVersion = '3.4.5'
+    jibVersion = '3.5.4'
 }
+
+apply from: 'dist.gradle'
 
 idea {
     module {

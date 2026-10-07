@@ -50,6 +50,7 @@ public class ExecutorActorControlService {
                                        RestoreBackupActor restoreBackupActor,
                                        ConverterMonitorActor converterMonitorFSM,
                                        NdpMonitorActor ndpMonitorActor,
+                                       NdpActor ndpActor,
                                        PingMonitorActor pingMonitorActor,
                                        CrawlerMonitorActor crawlerMonitorActor,
                                        LiveCrawlerMonitorActor liveCrawlerMonitorActor,
@@ -57,6 +58,7 @@ public class ExecutorActorControlService {
                                        ProcessLivenessMonitorActor processMonitorFSM,
                                        FileStorageMonitorActor fileStorageMonitorActor,
                                        IndexConstructorMonitorActor indexConstructorMonitorActor,
+                                       RankingConstructorMonitorActor rankingConstructorMonitorActor,
                                        TriggerAdjacencyCalculationActor triggerAdjacencyCalculationActor,
                                        ExportDataActor exportDataActor,
                                        ExportDomSampleDataActor exportDomSampleDataActor,
@@ -74,7 +76,10 @@ public class ExecutorActorControlService {
                                        UpdateRssActor updateRssActor,
                                        DomSampleActor domSampleActor,
                                        ScreenshotActor screenshotActor,
-                                       ScheduledMaintenanceActor scheduledMaintenanceActor
+                                       ScheduledMaintenanceActor scheduledMaintenanceActor,
+                                       MigrateDomainsActor migrateDomainsActor,
+                                       CleanupMigratedDomainsActor cleanupMigratedDomainsActor,
+                                       WideCrawlActor wideCrawlActor
                                        ) throws SQLException
     {
         this.messageQueueFactory = messageQueueFactory;
@@ -86,6 +91,10 @@ public class ExecutorActorControlService {
 
         register(ExecutorActor.SCHEDULED_MAINTENANCE, scheduledMaintenanceActor);
 
+        register(ExecutorActor.MIGRATE_DOMAINS, migrateDomainsActor);
+        register(ExecutorActor.CLEANUP_MIGRATED_DOMAINS, cleanupMigratedDomainsActor);
+        register(ExecutorActor.WIDE_CRAWL, wideCrawlActor);
+
         register(ExecutorActor.CRAWL, crawlActor);
         register(ExecutorActor.LIVE_CRAWL, liveCrawlActor);
         register(ExecutorActor.RECRAWL_SINGLE_DOMAIN, recrawlSingleDomainActor);
@@ -95,6 +104,7 @@ public class ExecutorActorControlService {
         register(ExecutorActor.CONVERT_AND_LOAD, convertAndLoadActor);
 
         register(ExecutorActor.PROC_INDEX_CONSTRUCTOR_SPAWNER, indexConstructorMonitorActor);
+        register(ExecutorActor.PROC_RANKING_CONSTRUCTOR_SPAWNER, rankingConstructorMonitorActor);
         register(ExecutorActor.PROC_CONVERTER_SPAWNER, converterMonitorFSM);
         register(ExecutorActor.PROC_LOADER_SPAWNER, loaderMonitor);
         register(ExecutorActor.PROC_CRAWLER_SPAWNER, crawlerMonitorActor);
@@ -102,6 +112,7 @@ public class ExecutorActorControlService {
         register(ExecutorActor.PROC_LIVE_CRAWL_SPAWNER, liveCrawlerMonitorActor);
         register(ExecutorActor.PROC_EXPORT_TASKS_SPAWNER, exportTasksMonitorActor);
         register(ExecutorActor.PROC_NDP_SPAWNER, ndpMonitorActor);
+        register(ExecutorActor.NDP, ndpActor);
         register(ExecutorActor.MONITOR_PROCESS_LIVENESS, processMonitorFSM);
         register(ExecutorActor.MONITOR_FILE_STORAGE, fileStorageMonitorActor);
 

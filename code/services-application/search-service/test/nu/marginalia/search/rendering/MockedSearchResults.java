@@ -46,6 +46,7 @@ public class MockedSearchResults {
                 1,
                 1,
                 new EdgeUrl(url),
+                null,
                 title,
                 desc,
                 "HTML5",
@@ -53,10 +54,11 @@ public class MockedSearchResults {
                 DomainIndexingState.ACTIVE,
                 0.5,
                 8,
+                0,
                 "",
                 mockPositionsMask(),
                 2,
-                new SearchResultItem(0, 0, 0, 0, 0),
+                new SearchResultItem(0, 1, 0, 0, 0, 0),
                 null);
 
     }
@@ -244,10 +246,7 @@ public class MockedSearchResults {
                                 )
                         )
                 ),
-                List.of(
-                        new ResultsPage(1, true, "#"),
-                        new ResultsPage(2, false, "#")
-                        )
+                "CUR"
         );
     }
 
@@ -261,10 +260,7 @@ public class MockedSearchResults {
                         mockUrlDetails("https://www.example.com/", "dolor sit"),
                         mockUrlDetails("https://www.example.com/", "amet quia")
                 ),
-                List.of(
-                        new ResultsPage(1, true, "#"),
-                        new ResultsPage(2, false, "#")
-                )
+                "CUR"
         );
     }
 
@@ -308,10 +304,13 @@ public class MockedSearchResults {
 
     public static Object mockCrosstalkModel() throws URISyntaxException {
         return new SearchCrosstalkService.CrosstalkResult(
+                "SST",
                 "www.example.com",
                 "other.example.com",
                 List.of(mockUrlDetails("https://www.example.com/some-incredibly-long-address-that-goes-on-and-on", "One document")),
-                List.of(mockUrlDetails("https://other.example.com/", "Other document")));
+                List.of(mockUrlDetails("https://other.example.com/", "Other document")),
+                "CUR",
+                "FIN");
     }
 
     public static Object mockAvailabilityData() {

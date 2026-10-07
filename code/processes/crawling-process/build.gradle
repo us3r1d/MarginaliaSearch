@@ -22,6 +22,7 @@ tasks.distZip.enabled = false
 apply from: "$rootProject.projectDir/srcsets.gradle"
 
 dependencies {
+    compileOnly libs.jsr305
 
     implementation project(':code:common:db')
     implementation project(':code:common:model')
@@ -68,6 +69,7 @@ dependencies {
     testImplementation libs.mockito
     testImplementation libs.wiremock
 
+    testImplementation project(':code:libraries:geo-ip')
     testImplementation project(':code:processes:test-data')
 }
 

@@ -126,34 +126,7 @@ public class IndexQuery {
         }
 
         for (var step : inclusionFilter) {
-
-            if (step instanceof ReverseIndexRetainFilter(SkipListReader range, String name, String term, _)) {
-                Map<Integer, Integer> histoMap = new TreeMap<>();
-                int sum = 0;
-
-                for (int i = 0; i < range.__stats_match_histo_retain.length; i++) {
-                    int val = range.__stats_match_histo_retain[i];
-                    if (val == 0) continue;
-
-                    histoMap.put(i, val);
-                    sum += i;
-                }
-
-                System.out.println("Retain " + name + " " + term + ": " + sum +  "=" + histoMap.toString());
-            }
-            else if (step instanceof ReverseIndexRejectFilter(SkipListReader range, String term, _)) {
-                Map<Integer, Integer> histoMap = new TreeMap<>();
-                int sum = 0;
-                for (int i = 0; i < range.__stats_match_histo_reject.length; i++) {
-                    int val = range.__stats_match_histo_reject[i];
-                    if (val == 0) continue;
-
-                    histoMap.put(i, val);
-                    sum += i;
-                }
-
-                System.out.println("Reject " + term + ": " + sum +  "=" + histoMap.toString());
-            }
+            System.out.println(step.describe());
         }
     }
 

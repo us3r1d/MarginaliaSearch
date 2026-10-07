@@ -2,7 +2,6 @@ package nu.marginalia.index;
 
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
-import nu.marginalia.index.searchset.SearchSetsService;
 
 import javax.annotation.CheckReturnValue;
 import java.util.Optional;
@@ -14,25 +13,14 @@ public class IndexOpsService {
     private final ReentrantLock opsLock = new ReentrantLock();
 
     private final StatefulIndex index;
-    private final SearchSetsService searchSetService;
 
     @Inject
-    public IndexOpsService(StatefulIndex index,
-                           SearchSetsService searchSetService) {
+    public IndexOpsService(StatefulIndex index) {
         this.index = index;
-        this.searchSetService = searchSetService;
     }
 
     public boolean isBusy() {
         return opsLock.isLocked();
-    }
-
-    public boolean rerank() {
-        return run(searchSetService::recalculatePrimaryRank);
-    }
-
-    public boolean repartition() {
-        return run(searchSetService::recalculateSecondary);
     }
 
     /** @return true if the index was switched
@@ -57,20 +45,4 @@ public class IndexOpsService {
         }
     }
 
-
-    @CheckReturnValue
-    public boolean run(Runnable r) {
-        if (!opsLock.tryLock())
-            return false;
-        try {
-            r.run();
-            return true;
-        }
-        finally {
-            opsLock.unlock();
-        }
-    }
-
-
 }
-

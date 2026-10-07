@@ -6,16 +6,33 @@ option java_multiple_files=true;
 
 service QueryApi {
   rpc query(RpcQsQuery) returns (RpcQsResponse) {}
+  rpc unrankedQuery(RpcQsUnrankedQuery) returns (RpcQsUnrankedResponse) {}
   rpc invalidateFilterCache(RpcQsInvalidateFilter) returns (Empty) {}
 }
+
 service IndexApi {
   rpc query(RpcIndexQuery) returns (RpcIndexQueryResponse) {}
+  rpc unrankedQuery(RpcIndexUnrankedQuery) returns (RpcIndexQueryResponse) {}
+}
+
+service IndexUrlApi {
+  rpc getUrl(RpcDocumentIdRequest) returns (RpcIndexUrlResponse) {}
+}
+
+message RpcDocumentIdRequest {
+  int64 docId = 1;
+}
+message RpcIndexUrlResponse {
+  string url = 1;
 }
 
 message Empty {}
 
 message RpcIndexQueryResponse {
   repeated RpcDecoratedResultItem results = 2;
+
+  int64 lastResultId = 3;
+  bool finished = 4;
 }
 
 
@@ -33,12 +50,21 @@ message RpcQsQuery {
   NSFW_FILTER_TIER nsfwFilterTier = 5;
   RpcQueryLimits queryLimits = 6;
   RpcQsQueryPagination pagination = 7;
+}
 
-  enum NSFW_FILTER_TIER {
-    NONE = 0;
-    DANGER = 1;
-    PORN_AND_GAMBLING = 2;
-  };
+
+message RpcQsUnrankedQuery {
+  repeated string termsRequired = 1;
+  repeated string termsExcluded = 2;
+
+  repeated int32 requiredDomainIds = 10;     // (optional) A list of domain IDs to consider
+  repeated int32 excludedDomainIds = 11;
+
+  RpcQueryLimits queryLimits = 14;
+
+  string encodedCursor = 15;
+
+  string langIsoCode = 20;
 }
 
 message RpcQsFilterIdentifier {
@@ -79,6 +105,11 @@ message RpcQsResponse {
   RpcQsResultPagination pagination = 6;
 }
 
+message RpcQsUnrankedResponse {
+  repeated RpcDecoratedResultItem results = 1;
+  string encodedCursor = 15;
+}
+
 message RpcQsQueryPagination {
   int32 page = 1;
   int32 pageSize = 2;
@@ -97,6 +128,19 @@ message RpcTemporalBias {
     OLD = 2;
   }
   Bias bias = 1;
+}
+
+message RpcIndexUnrankedQuery {
+  repeated string termsRequired = 1;
+  repeated string termsExcluded = 2;
+
+  repeated int32 requiredDomainIds = 10;     // (optional) A list of domain IDs to consider
+  repeated int32 excludedDomainIds = 11;
+
+  RpcQueryLimits queryLimits = 14;
+  int64 afterId = 15;
+
+  string langIsoCode = 20;
 }
 
 /* Index service query request */
@@ -119,14 +163,13 @@ message RpcIndexQuery {
   repeated int32 excludedDomainIds = 15;
   repeated int32 priorityDomainIds = 16;
   repeated float priorityDomainIdsWeights = 17;
-
-  enum NSFW_FILTER_TIER {
-    NONE = 0;
-    DANGER = 1;
-    PORN_AND_GAMBLING = 2;
-  };
 }
 
+enum NSFW_FILTER_TIER {
+  NONE = 0;
+  DANGER = 1;
+  PORN_AND_GAMBLING = 2;
+};
 
 /* A tagged union encoding some limit on a field */
 message RpcSpecLimit {
@@ -150,13 +193,14 @@ message RpcDecoratedResultItem {
   double urlQuality = 5;
   string format = 6;
   int32 features = 7; // bitmask encoding features of the document
-  int32 pubYear = 8;
+  int32 pubYear = 8; // possibly a guesstimate, epoch is 1995
   int64 dataHash = 9;
   int32 wordsTotal = 10;
   double rankingScore = 11; // The ranking score of this search result item, lower is better
   int64 bestPositions = 12;
   RpcResultRankingDetails rankingDetails = 13; // optional, only present if exportDebugData is true in RpcResultRankingParameters
   int32 resultsFromDomain = 14;
+  int32 pubDate = 15; // day-precision date as days since 1989-03-12, 0 = unknown
 }
 
 /** A raw index-service view of a search result */
@@ -167,6 +211,8 @@ message RpcRawResultItem {
   repeated RpcResultKeywordScore keywordScores = 5;
   bool hasPriorityTerms = 6; // true if this word is important to the document
   MATCH_TYPE matchType = 7; // the type of match this result represents
+
+  int32 node = 8;
 
   enum MATCH_TYPE {
     FLAGS = 0;
@@ -247,9 +293,20 @@ message RpcQueryTerms {
   repeated string termsExclude = 2;   // These terms must be absent
   repeated string termsRequire = 3;   // These terms must be present, but do not affect ranking
   repeated string termsPriority = 4;  // These terms are not mandatory, but affect ranking positively if they are present
-  repeated RpcPhrases phrases = 5; // Groups of terms that must exist in proximity of each other
-  string compiledQuery = 6;  // Compiled query in infix notation
+  repeated RpcPhrases phrases = 5;    // Groups of terms that must exist in proximity of each other
+  reserved 6;                         // Formerly: Compiled query in infix notation
   repeated float termsPriorityWeight = 7;
+  RpcCompiledQuery compiledQuery = 8; // The ranked terms and the alternative ways of satisfying them
+}
+
+message RpcCompiledQuery {
+  repeated string terms = 1;         // String representation of terms
+  repeated RpcTermPath paths = 2;    // list of indices into 'terms'
+  repeated int32 variantClass = 3;   // Index of canonical 'terms' for a variant
+}
+
+message RpcTermPath {
+  repeated int32 term = 1;
 }
 
 /* Defines a group of search terms that must exist in the the specified order within the document */

@@ -8,6 +8,7 @@ import nu.marginalia.slop.column.array.ByteArrayColumn;
 import nu.marginalia.slop.column.array.LongArrayColumn;
 import nu.marginalia.slop.column.primitive.IntColumn;
 import nu.marginalia.slop.column.primitive.LongColumn;
+import nu.marginalia.slop.column.primitive.ShortColumn;
 import nu.marginalia.slop.column.string.EnumColumn;
 
 import java.io.IOException;
@@ -19,6 +20,7 @@ public class IndexJournalSlopWriter extends SlopTable {
 
     private final IntColumn.Writer featuresWriter;
     private final IntColumn.Writer sizeWriter;
+    private final ShortColumn.Writer pubDateWriter;
     private final LongColumn.Writer combinedIdWriter;
     private final LongColumn.Writer documentMetaWriter;
 
@@ -28,6 +30,7 @@ public class IndexJournalSlopWriter extends SlopTable {
 
     private final VarintCodedSequenceArrayColumn.Writer spansWriter;
     private final ByteArrayColumn.Writer spanCodesWriter;
+    private final ByteArrayColumn.Writer documentTextZstdWriter;
     private final EnumColumn.Writer languagesWriter;
 
     public IndexJournalSlopWriter(Path dir, int page) throws IOException {
@@ -40,6 +43,7 @@ public class IndexJournalSlopWriter extends SlopTable {
 
         featuresWriter = IndexJournalPage.features.create(this);
         sizeWriter = IndexJournalPage.size.create(this);
+        pubDateWriter = IndexJournalPage.pubDate.create(this);
 
         combinedIdWriter = IndexJournalPage.combinedId.create(this);
         documentMetaWriter = IndexJournalPage.documentMeta.create(this);
@@ -50,6 +54,7 @@ public class IndexJournalSlopWriter extends SlopTable {
 
         spanCodesWriter = IndexJournalPage.spanCodes.create(this);
         spansWriter = IndexJournalPage.spans.create(this);
+        documentTextZstdWriter = IndexJournalPage.documentTextZstd.create(this);
 
         languagesWriter = IndexJournalPage.languageIsoCode.create(this);
     }
@@ -59,6 +64,7 @@ public class IndexJournalSlopWriter extends SlopTable {
         combinedIdWriter.put(combinedId);
         featuresWriter.put(keywordsProjection.htmlFeatures());
         sizeWriter.put(keywordsProjection.length());
+        pubDateWriter.put((short) keywordsProjection.pubDate());
         documentMetaWriter.put(keywordsProjection.documentMetadata());
         languagesWriter.put(keywordsProjection.languageIsoCode());
 
@@ -80,11 +86,14 @@ public class IndexJournalSlopWriter extends SlopTable {
 
         spanCodesWriter.put(keywordsProjection.spanCodes());
         spansWriter.put(keywordsProjection.spans());
+
+        documentTextZstdWriter.put(keywordsProjection.documentTextZstd());
     }
 
     public void close() throws IOException {
         featuresWriter.close();
         sizeWriter.close();
+        pubDateWriter.close();
         combinedIdWriter.close();
         documentMetaWriter.close();
         termIdsWriter.close();
@@ -93,5 +102,6 @@ public class IndexJournalSlopWriter extends SlopTable {
         languagesWriter.close();
         spansWriter.close();
         spanCodesWriter.close();
+        documentTextZstdWriter.close();
     }
 }

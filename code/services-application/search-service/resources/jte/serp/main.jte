@@ -1,8 +1,11 @@
 @import nu.marginalia.language.model.LanguageDefinition
+@import nu.marginalia.scrapestopper.ScrapeStopper
+@import nu.marginalia.search.ScrapeStopperInterceptor
 @import nu.marginalia.search.model.DecoratedSearchResults
 @import nu.marginalia.search.model.ClusteredUrlDetails
 @import nu.marginalia.search.model.NavbarModel
 @import nu.marginalia.search.model.ResultsPage
+@import nu.marginalia.search.svc.SearchResultRedirectService
 @import java.util.Map
 @import java.util.Optional
 
@@ -86,7 +89,15 @@
                 No search results found.  Try different search terms, or spelling variations.  The search engine currently
                 only supports queries in the English language.
             </div>
+        @elseif (SearchResultRedirectService.isEnabled())
+            <div class="border dark:border-gray-600 rounded flex space-x-4 bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-100 text-sm p-4 items-center">
+                The search engine is currently under being hit so aggressively by bots it's
+                interfering with the ability to serve regular search traffic.
+                Emergency anti-scraping measures are enabled.  Sorry about the inconvenience.
+            </div>
+
         @endif
+        
 
         <div>
             <h1 class="sr-only"> Results </h1>
@@ -101,14 +112,22 @@
 
         <!-- Pagination -->
         @if (results.getResultPages().size() > 1)
-            <div class="mt-8 flex justify-center space-x-2 font-mono text-sm">
-                @for(ResultsPage page : results.getResultPages())
-                    @if (page.current())
-                        <a href="${results.getParams().withPage(page.number()).renderUrl()}" class="px-2 py-1 border dark:border-gray-600 border-gray-400 bg-gray-200 dark:bg-gray-900">${page.number()}</a>
-                    @else
-                        <a href="${results.getParams().withPage(page.number()).renderUrl()}" class="px-2 py-1 bg-white border dark:border-gray-600 border-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-900">${page.number()}</a>
-                    @endif
-                @endfor
+            <div class="mt-8 flex justify-center space-x-2 font-mono text-md">
+                !{
+                    ResultsPage prevPage = results.getPrevPage();
+                    ResultsPage currentPage = results.getCurrentPage();
+                    ResultsPage nextPage = results.getNextPage();
+                }
+
+                @if (prevPage != null)
+                    <a href="${results.getParams().withPage(prevPage.number()).renderUrl()}" class="px-2 py-1 bg-white border dark:border-gray-600 border-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-900">Previous</a>
+                @endif
+                @if (currentPage != null)
+                    <a href="${results.getParams().withPage(currentPage.number()).renderUrl()}" class="px-2 py-1 border dark:border-gray-600 border-gray-400 bg-gray-200 dark:bg-gray-900">Page ${currentPage.number()} of ${results.getResultPages().size()}</a>
+                @endif
+                @if (nextPage != null)
+                    <a href="${results.getParams().withPage(nextPage.number()).renderUrl()}" class="px-2 py-1 bg-white border dark:border-gray-600 border-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-900">Next</a>
+                @endif
             </div>
         @endif
     </main>

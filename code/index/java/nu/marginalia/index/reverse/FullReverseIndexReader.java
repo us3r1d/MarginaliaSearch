@@ -22,6 +22,9 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.channels.FileChannel;
+import java.nio.file.StandardOpenOption;
+import java.lang.foreign.SegmentAllocator;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,8 +38,14 @@ public class FullReverseIndexReader {
 
     private final LongArray documents;
     private final int positionsFileFd;
+
+    /** Mapping of the positions file, for fetch paths that read resident pages
+     *  directly instead of copying them through the fd above */
+    private final Arena positionsArena;
+    private final MemorySegment positionsSegment;
     private final BufferPool dataPool;
     private final SkipListValueReader valueReader;
+    private final SkipListFormat skipListFormat;
     private final String name;
 
     public FullReverseIndexReader(String name,
@@ -48,11 +57,15 @@ public class FullReverseIndexReader {
     {
         this.name = name;
 
-        if (!Files.exists(documents) || !Files.exists(documentValues) || !validateDocumentsFooter(documents)) {
+        this.skipListFormat = documentsFormat(documents, documentValues);
+
+        if (skipListFormat == null) {
             this.documents = null;
             this.dataPool = null;
             this.valueReader = null;
             this.positionsFileFd = -1;
+            this.positionsArena = null;
+            this.positionsSegment = null;
             this.wordLexiconMap = Map.of();
 
             wordLexicons.forEach(WordLexicon::close);
@@ -62,6 +75,14 @@ public class FullReverseIndexReader {
 
         this.wordLexiconMap = wordLexicons.stream().collect(Collectors.toUnmodifiableMap(lexicon -> lexicon.languageIsoCode, v->v));
         this.positionsFileFd = LinuxSystemCalls.openBuffered(positionsFile);
+        // Position records are small and randomly accessed, so readahead is all waste
+        LinuxSystemCalls.fadviseRandom(positionsFileFd);
+
+        positionsArena = Arena.ofShared();
+        try (FileChannel channel = FileChannel.open(positionsFile, StandardOpenOption.READ)) {
+            positionsSegment = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size(), positionsArena);
+        }
+        LinuxSystemCalls.madviseRandom(positionsSegment);
 
         logger.info("Switching reverse index");
 
@@ -81,14 +102,19 @@ public class FullReverseIndexReader {
         return this.valueReader != null;
     }
 
-    private boolean validateDocumentsFooter(Path documents) {
+    @Nullable
+    private SkipListFormat documentsFormat(Path documents, Path documentValues) {
+        if (!Files.exists(documents))
+            return null;
+        if (!Files.exists(documentValues))
+            return null;
+
         try {
-            SkipListWriter.validateFooter(documents, "skplist-docs-file");
-            return true;
+            return SkipListWriter.validateFooter(documents, "skplist-docs-file");
         }
-        catch (IllegalArgumentException|IOException ex) {
+        catch (IllegalArgumentException | IOException ex) {
             logger.error("Failed to validate documents file footer", ex);
-            return false;
+            return null;
         }
     }
 
@@ -198,14 +224,16 @@ public class FullReverseIndexReader {
 
     /** Create a BTreeReader for the document offset associated with a termId */
     private SkipListReader getReader(long offset) {
-        return new SkipListReader(dataPool, valueReader, offset);
+        return new SkipListReader(dataPool, valueReader, offset, skipListFormat);
     }
 
     @Nullable
     @CheckReturnValue
     public SkipListReader.ValueReader getValueReader(SearchContext searchContext,
-                                                               long termId,
-                                                               CombinedDocIdList keys) {
+                                                     SegmentAllocator allocator,
+                                                     long termId,
+                                                     CombinedDocIdList keys,
+                                                     @Nullable ValueBatchContext batchContext) {
         WordLexicon lexicon = searchContext.languageContext.wordLexiconFull;
         if (null == lexicon) {
             return null;
@@ -215,7 +243,22 @@ public class FullReverseIndexReader {
         if (offset < 0)
             return null;
 
-        return getReader(offset).getValueReader(keys.array());
+        return getReader(offset).getValueReader(allocator, keys.array(), batchContext);
+    }
+
+    /** Create a context for batched value block reads, or null if this index has
+     *  no value reader to open one against */
+    @Nullable
+    public ValueBatchContext createValueBatchContext() {
+        if (valueReader == null) {
+            return null;
+        }
+        return valueReader.createBatchContext();
+    }
+
+    @Nullable
+    public SkipListValueReader valueReaderIdentity() {
+        return valueReader;
     }
 
     public BitSet getValuePresence(SearchContext searchContext, long termId, CombinedDocIdList keys) {
@@ -248,6 +291,10 @@ public class FullReverseIndexReader {
         if (positionsFileFd > 0) {
             LinuxSystemCalls.closeFd(positionsFileFd);
         }
+
+        if (positionsArena != null) {
+            positionsArena.close();
+        }
     }
 
     @Nullable
@@ -255,7 +302,15 @@ public class FullReverseIndexReader {
         return wordLexiconMap.get(languageIsoCode);
     }
 
-    public CodedSequence[] getTermPositions(Arena arena, long[] offsets) {
+    public int positionsFd() {
+        return positionsFileFd;
+    }
+
+    public MemorySegment mappedPositions() {
+        return positionsSegment;
+    }
+
+    public CodedSequence[] getTermPositions(SegmentAllocator allocator, long[] offsets) {
         MemorySegment[] segments = new MemorySegment[offsets.length];
 
         for (int i = 0; i < offsets.length; i++) {
@@ -265,7 +320,7 @@ public class FullReverseIndexReader {
             int size = PositionCodec.decodeSize(encodedOffset);
             long offest = PositionCodec.decodeOffset(encodedOffset);
 
-            var segment = arena.allocate(size, 8);
+            var segment = allocator.allocate(size, 8);
             segments[i] = segment;
 
             LinuxSystemCalls.readAt(positionsFileFd, segment, offest);

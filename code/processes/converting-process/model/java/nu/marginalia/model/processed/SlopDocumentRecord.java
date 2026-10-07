@@ -10,6 +10,7 @@ import nu.marginalia.slop.column.dynamic.VarintColumn;
 import nu.marginalia.slop.column.primitive.FloatColumn;
 import nu.marginalia.slop.column.primitive.IntColumn;
 import nu.marginalia.slop.column.primitive.LongColumn;
+import nu.marginalia.slop.column.primitive.ShortColumn;
 import nu.marginalia.slop.column.string.EnumColumn;
 import nu.marginalia.slop.column.string.StringColumn;
 import nu.marginalia.slop.desc.StorageType;
@@ -29,7 +30,7 @@ public record SlopDocumentRecord(
         String state,
         String stateReason,
         String title,
-        String description,
+        byte[] documentTextZstd,
         int htmlFeatures,
         String htmlStandard,
         int length,
@@ -38,6 +39,7 @@ public record SlopDocumentRecord(
         long documentMetadata,
         String languageIsoCode,
         Integer pubYear,
+        int pubDate,
         List<String> words,
         long[] metas,
         List<VarintCodedSequence> positions,
@@ -58,12 +60,14 @@ public record SlopDocumentRecord(
             int htmlFeatures,
             long documentMetadata,
             int length,
+            int pubDate,
             String languageIsoCode,
             List<String> words,
             long[] metas,
             List<VarintCodedSequence> positions,
             byte[] spanCodes,
-            List<VarintCodedSequence> spans) {
+            List<VarintCodedSequence> spans,
+            byte[] documentTextZstd) {
 
         // Override the equals method since records don't generate default equals that deal with array fields properly
         @Override
@@ -75,13 +79,15 @@ public record SlopDocumentRecord(
                     && ordinal == that.ordinal
                     && htmlFeatures == that.htmlFeatures
                     && documentMetadata == that.documentMetadata
+                    && pubDate == that.pubDate
                     && Arrays.equals(metas, that.metas)
                     && Objects.equals(domain, that.domain)
                     && Objects.equals(languageIsoCode, that.languageIsoCode)
                     && Arrays.equals(spanCodes, that.spanCodes)
                     && Objects.equals(words, that.words)
                     && Objects.equals(spans, that.spans)
-                    && Objects.equals(positions, that.positions);
+                    && Objects.equals(positions, that.positions)
+                    && Arrays.equals(documentTextZstd, that.documentTextZstd);
         }
 
         @Override
@@ -91,12 +97,14 @@ public record SlopDocumentRecord(
             result = 31 * result + htmlFeatures;
             result = 31 * result + Long.hashCode(documentMetadata);
             result = 31 * result + length;
+            result = 31 * result + pubDate;
             result = 31 * result + Objects.hashCode(words);
             result = 31 * result + Objects.hashCode(languageIsoCode);
             result = 31 * result + Arrays.hashCode(metas);
             result = 31 * result + Objects.hashCode(positions);
             result = 31 * result + Arrays.hashCode(spanCodes);
             result = 31 * result + Objects.hashCode(spans);
+            result = 31 * result + Arrays.hashCode(documentTextZstd);
             return result;
         }
     }
@@ -106,7 +114,6 @@ public record SlopDocumentRecord(
             String url,
             int ordinal,
             String title,
-            String description,
             int htmlFeatures,
             String htmlStandard,
             String language,
@@ -127,11 +134,13 @@ public record SlopDocumentRecord(
 
     // Document metadata
     private static final StringColumn titlesColumn = new StringColumn("title", StandardCharsets.UTF_8, StorageType.GZIP);
-    private static final StringColumn descriptionsColumn = new StringColumn("description", StandardCharsets.UTF_8, StorageType.GZIP);
+
+    private static final ByteArrayColumn documentTextZstdColumn = new ByteArrayColumn("documentTextZstd", StorageType.PLAIN);
     private static final EnumColumn htmlStandardsColumn = new EnumColumn("htmlStandard", StandardCharsets.UTF_8, StorageType.PLAIN);
     private static final IntColumn htmlFeaturesColumn = new IntColumn("htmlFeatures", StorageType.PLAIN);
     private static final IntColumn lengthsColumn = new IntColumn("length", StorageType.PLAIN);
-    private static final IntColumn pubYearColumn = new IntColumn("pubYear", StorageType.PLAIN);
+    private static final ShortColumn pubYearColumn = new ShortColumn("pubYear", StorageType.PLAIN);
+    private static final ShortColumn pubDateColumn = new ShortColumn("pubDate", StorageType.PLAIN);
     private static final LongColumn hashesColumn = new LongColumn("hash", StorageType.PLAIN);
     private static final FloatColumn qualitiesColumn = new FloatColumn("quality", StorageType.PLAIN);
     private static final LongColumn domainMetadata = new LongColumn("domainMetadata", StorageType.PLAIN);
@@ -154,6 +163,7 @@ public record SlopDocumentRecord(
         private final IntColumn.Reader htmlFeaturesReader;
         private final LongColumn.Reader domainMetadataReader;
         private final IntColumn.Reader lengthsReader;
+        private final ShortColumn.Reader pubDateReader;
         private final EnumColumn.Reader languageReader;
 
         private final ObjectArrayColumn<String>.Reader keywordsReader;
@@ -162,6 +172,7 @@ public record SlopDocumentRecord(
 
         private final ByteArrayColumn.Reader spanCodesReader;
         private final VarintCodedSequenceArrayColumn.Reader spansReader;
+        private final ByteArrayColumn.Reader documentTextZstdReader;
 
         public KeywordsProjectionReader(SlopTable.Ref<SlopDocumentRecord> pageRef) throws IOException {
             super(pageRef);
@@ -170,6 +181,7 @@ public record SlopDocumentRecord(
             htmlFeaturesReader = htmlFeaturesColumn.open(this);
             domainMetadataReader = domainMetadata.open(this);
             lengthsReader = lengthsColumn.open(this);
+            pubDateReader = pubDateColumn.open(this);
 
             languageReader =  languageColumn.open(this);
 
@@ -179,6 +191,8 @@ public record SlopDocumentRecord(
 
             spanCodesReader = spanCodesColumn.open(this);
             spansReader = spansColumn.open(this);
+
+            documentTextZstdReader = documentTextZstdColumn.open(this);
         }
 
         public boolean hasMore() throws IOException {
@@ -192,6 +206,7 @@ public record SlopDocumentRecord(
             int htmlFeatures = htmlFeaturesReader.get();
             long documentMetadata = domainMetadataReader.get();
             int length = lengthsReader.get();
+            int pubDate = pubDateReader.get();
 
             String language = languageReader.get();
 
@@ -200,6 +215,7 @@ public record SlopDocumentRecord(
             long[] metas = termMetaReader.get();
             byte[] spanCodes = spanCodesReader.get();
             List<VarintCodedSequence> spans = spansReader.get();
+            byte[] documentTextZstd = documentTextZstdReader.get();
 
             return new KeywordsProjection(
                     domain,
@@ -207,12 +223,14 @@ public record SlopDocumentRecord(
                     htmlFeatures,
                     documentMetadata,
                     length,
+                    pubDate,
                     language,
                     words,
                     metas,
                     positions,
                     spanCodes,
-                    spans
+                    spans,
+                    documentTextZstd
             );
         }
 
@@ -223,7 +241,6 @@ public record SlopDocumentRecord(
         private final StringColumn.Reader urlsReader;
         private final VarintColumn.Reader ordinalsReader;
         private final StringColumn.Reader titlesReader;
-        private final StringColumn.Reader descriptionsReader;
         private final EnumColumn.Reader languageReader;
 
         private final IntColumn.Reader htmlFeaturesReader;
@@ -231,7 +248,7 @@ public record SlopDocumentRecord(
         private final IntColumn.Reader lengthsReader;
         private final LongColumn.Reader hashesReader;
         private final FloatColumn.Reader qualitiesReader;
-        private final IntColumn.Reader pubYearReader;
+        private final ShortColumn.Reader pubYearReader;
 
         public MetadataReader(SlopTable.Ref<SlopDocumentRecord> pageRef) throws IOException{
             super(pageRef);
@@ -240,7 +257,6 @@ public record SlopDocumentRecord(
             this.urlsReader = urlsColumn.open(this);
             this.ordinalsReader = ordinalsColumn.open(this);
             this.titlesReader = titlesColumn.open(this);
-            this.descriptionsReader = descriptionsColumn.open(this);
             this.htmlFeaturesReader = htmlFeaturesColumn.open(this);
             this.htmlStandardsReader = htmlStandardsColumn.open(this);
             this.languageReader = languageColumn.open(this);
@@ -265,7 +281,6 @@ public record SlopDocumentRecord(
                     urlsReader.get(),
                     ordinalsReader.get(),
                     titlesReader.get(),
-                    descriptionsReader.get(),
                     htmlFeaturesReader.get(),
                     htmlStandardsReader.get(),
                     languageReader.get(),
@@ -285,14 +300,15 @@ public record SlopDocumentRecord(
         private final EnumColumn.Writer statesWriter;
         private final StringColumn.Writer stateReasonsWriter;
         private final StringColumn.Writer titlesWriter;
-        private final StringColumn.Writer descriptionsWriter;
+        private final ByteArrayColumn.Writer documentTextZstdWriter;
         private final IntColumn.Writer htmlFeaturesWriter;
         private final EnumColumn.Writer htmlStandardsWriter;
         private final IntColumn.Writer lengthsWriter;
         private final LongColumn.Writer hashesWriter;
         private final FloatColumn.Writer qualitiesWriter;
         private final LongColumn.Writer domainMetadataWriter;
-        private final IntColumn.Writer pubYearWriter;
+        private final ShortColumn.Writer pubYearWriter;
+        private final ShortColumn.Writer pubDateWriter;
         private final EnumColumn.Writer languageWriter;
         private final ObjectArrayColumn<String>.Writer keywordsWriter;
         private final LongArrayColumn.Writer termMetaWriter;
@@ -309,7 +325,7 @@ public record SlopDocumentRecord(
             statesWriter = statesColumn.create(this);
             stateReasonsWriter = stateReasonsColumn.create(this);
             titlesWriter = titlesColumn.create(this);
-            descriptionsWriter = descriptionsColumn.create(this);
+            documentTextZstdWriter = documentTextZstdColumn.create(this);
             htmlFeaturesWriter = htmlFeaturesColumn.create(this);
             htmlStandardsWriter = htmlStandardsColumn.create(this);
             lengthsWriter = lengthsColumn.create(this);
@@ -317,6 +333,7 @@ public record SlopDocumentRecord(
             qualitiesWriter = qualitiesColumn.create(this);
             domainMetadataWriter = domainMetadata.create(this);
             pubYearWriter = pubYearColumn.create(this);
+            pubDateWriter = pubDateColumn.create(this);
             languageWriter = languageColumn.create(this);
 
             keywordsWriter = keywordsColumn.create(this);
@@ -334,7 +351,7 @@ public record SlopDocumentRecord(
             statesWriter.put(record.state());
             stateReasonsWriter.put(record.stateReason());
             titlesWriter.put(record.title());
-            descriptionsWriter.put(record.description());
+            documentTextZstdWriter.put(record.documentTextZstd());
             htmlFeaturesWriter.put(record.htmlFeatures());
             htmlStandardsWriter.put(record.htmlStandard());
 
@@ -345,10 +362,12 @@ public record SlopDocumentRecord(
             domainMetadataWriter.put(record.documentMetadata());
 
             if (record.pubYear == null) {
-                pubYearWriter.put(-1);
+                pubYearWriter.put((short) -1);
             } else {
-                pubYearWriter.put(record.pubYear());
+                pubYearWriter.put((short) record.pubYear().intValue());
             }
+
+            pubDateWriter.put((short) record.pubDate());
 
             keywordsWriter.put(record.words());
             termMetaWriter.put(record.metas());

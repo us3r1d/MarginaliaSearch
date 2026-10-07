@@ -79,12 +79,14 @@ public class TestJournalFactory {
                             0,
                             entry.docMeta,
                             15,
+                            0,
                             "en",
                             Arrays.asList(termIds),
                             meta,
                             Arrays.asList(positions),
                             new byte[0],
-                            List.of()
+                            List.of(),
+                            new byte[0]
                     ),
                     new KeywordHasher.AsciiIsh());
         }
@@ -116,12 +118,14 @@ public class TestJournalFactory {
                             0,
                             entry.docMeta,
                             15,
+                            0,
                             "en",
                             Arrays.asList(termIds),
                             meta,
                             Arrays.asList(positions),
                             new byte[0],
-                            List.of()
+                            List.of(),
+                            new byte[0]
                     ),
                     new KeywordHasher.AsciiIsh());
 

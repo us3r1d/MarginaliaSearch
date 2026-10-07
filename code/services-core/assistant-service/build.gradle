@@ -4,7 +4,7 @@ plugins {
     id 'application'
     id 'com.gradleup.shadow'
     id 'jvm-test-suite'
-    id 'com.google.cloud.tools.jib' version '3.4.5'
+    id 'com.google.cloud.tools.jib' version '3.5.4'
 }
 
 application {
@@ -55,12 +55,10 @@ dependencies {
 
 
     implementation libs.notnull
-    implementation libs.guava
     implementation dependencies.create(libs.guice.get()) {
         exclude group: 'com.google.guava'
     }
     implementation libs.bundles.jooby
-    implementation libs.bundles.jetty
     implementation libs.opencsv
     implementation libs.sqlite
     implementation libs.trove

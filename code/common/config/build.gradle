@@ -14,13 +14,13 @@ java {
 apply from: "$rootProject.projectDir/srcsets.gradle"
 
 dependencies {
+    compileOnly libs.jsr305
     implementation project(':code:common:db')
     implementation project(':code:common:model')
 
     implementation libs.bundles.slf4j
     implementation libs.bundles.mariadb
     implementation libs.bundles.httpcomponents
-    implementation libs.mockito
     implementation libs.guava
     implementation dependencies.create(libs.guice.get()) {
         exclude group: 'com.google.guava'
@@ -33,13 +33,11 @@ dependencies {
 
     testImplementation project(':code:libraries:test-helpers')
 
-    testImplementation platform('org.testcontainers:testcontainers-bom:1.21.4') {
+    testImplementation platform(libs.testcontainers.bom.get()) {
         exclude group: 'org.apache.commons'
     }
     testImplementation libs.commons.compress
     testImplementation libs.commons.codec
-    testImplementation 'org.testcontainers:mariadb:1.21.4'
-    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
-    testImplementation project(':code:libraries:test-helpers')
+    testImplementation libs.bundles.testcontainers
 
 }

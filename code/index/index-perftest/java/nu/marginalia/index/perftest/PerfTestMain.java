@@ -1,6 +1,7 @@
 package nu.marginalia.index.perftest;
 
 import nu.marginalia.WmsaHome;
+import nu.marginalia.api.searchquery.IndexProtobufCodec;
 import nu.marginalia.api.searchquery.RpcIndexQuery;
 import nu.marginalia.api.searchquery.RpcQsQuery;
 import nu.marginalia.api.searchquery.RpcQueryLimits;
@@ -8,7 +9,7 @@ import nu.marginalia.api.searchquery.model.CompiledSearchFilterSpec;
 import nu.marginalia.api.searchquery.model.results.PrototypeRankingParameters;
 import nu.marginalia.array.page.LongQueryBuffer;
 import nu.marginalia.functions.searchquery.QueryFactory;
-import nu.marginalia.index.searchset.connectivity.ConnectivityView;
+import nu.marginalia.ranking.connectivity.ConnectivityView;
 import nu.marginalia.language.NounVariants;
 import nu.marginalia.functions.searchquery.query_parser.QueryExpansion;
 import nu.marginalia.index.CombinedIndexReader;
@@ -22,7 +23,7 @@ import nu.marginalia.index.reverse.FullReverseIndexReader;
 import nu.marginalia.index.reverse.PrioReverseIndexReader;
 import nu.marginalia.index.reverse.WordLexicon;
 import nu.marginalia.index.reverse.query.IndexQuery;
-import nu.marginalia.index.searchset.SearchSetAny;
+import nu.marginalia.ranking.set.SearchSetAny;
 import nu.marginalia.language.config.LanguageConfigLocation;
 import nu.marginalia.language.config.LanguageConfiguration;
 import nu.marginalia.language.keywords.KeywordHasher;
@@ -43,7 +44,7 @@ import java.util.List;
 
 public class PerfTestMain {
     static Duration warmupTime = Duration.ofMinutes(1);
-    static Duration runTime = Duration.ofMinutes(10);
+    static Duration runTime = Duration.ofMinutes(Integer.getInteger("perftest.runMinutes", 10));
 
     public static void main(String[] args) {
         if (args.length != 4) {
@@ -87,7 +88,8 @@ public class PerfTestMain {
                 new ForwardIndexReader(
                         indexDir.resolve("ir/fwd-doc-id.dat"),
                         indexDir.resolve("ir/fwd-doc-data.dat"),
-                        indexDir.resolve("ir/fwd-spans.dat")
+                        indexDir.resolve("ir/fwd-spans.dat"),
+                        indexDir.resolve("ir/fwd-doc-texts.dat")
                 ),
                 new FullReverseIndexReader(
                         "full",
@@ -225,7 +227,7 @@ public class PerfTestMain {
                 CompiledSearchFilterSpec.builder("test", "test").build(),
                 PrototypeRankingParameters.sensibleDefaults()).indexQuery;
 
-        System.out.println("Query compiled to: " + parsedQuery.getTerms().getCompiledQuery());
+        System.out.println("Query compiled to: " + IndexProtobufCodec.convertCompiledQuery(parsedQuery.getTerms().getCompiledQuery()));
 
         System.out.println("Running warmup loop!");
         int sum = 0;
@@ -237,15 +239,16 @@ public class PerfTestMain {
         List<Double> times = new ArrayList<>();
         int iter;
         for (iter = 0;; iter++) {
-            var execution = new IndexQueryExecution(indexReader, new DocumentDbReader(indexDir.resolve("ldbr/documents.db")), rankingService,
-                    SearchContext.create(indexReader, new KeywordHasher.AsciiIsh(), parsedQuery, new SearchSetAny(), ConnectivityView.empty()), 1);
+            var execution = new IndexQueryExecution(indexReader,
+                    new DocumentDbReader(indexDir.resolve("ldbr/documents.db")),
+                    rankingService,
+                    SearchContext.create(indexReader, 1, new KeywordHasher.AsciiIsh(), parsedQuery, new SearchSetAny(), ConnectivityView.empty()), 1);
             long start = System.nanoTime();
             execution.run();
             long end = System.nanoTime();
             sum2 += execution.itemsProcessed();
             rates.add(execution.itemsProcessed() / ((end - start)/1_000_000_000.));
             times.add((end - start)/1_000_000.);
-            indexReader.reset();
             if ((iter % 100) == 0) {
                 if (Instant.now().isAfter(runEndTime)) {
                     break;
@@ -286,9 +289,9 @@ public class PerfTestMain {
                 CompiledSearchFilterSpec.builder("test", "test").build(),
                 PrototypeRankingParameters.sensibleDefaults()).indexQuery;
 
-        System.out.println("Query compiled to: " + parsedQuery.getTerms().getCompiledQuery());
+        System.out.println("Query compiled to: " + IndexProtobufCodec.convertCompiledQuery(parsedQuery.getTerms().getCompiledQuery()));
 
-        SearchContext searchContext = SearchContext.create(indexReader, new KeywordHasher.AsciiIsh(), parsedQuery, new SearchSetAny(), ConnectivityView.empty());
+        SearchContext searchContext = SearchContext.create(indexReader, 1, new KeywordHasher.AsciiIsh(), parsedQuery, new SearchSetAny(), ConnectivityView.empty());
 
 
         Instant runEndTime = Instant.now().plus(runTime);
@@ -301,22 +304,24 @@ public class PerfTestMain {
         int sum2 = 0;
         List<Double> times = new ArrayList<>();
         for (iter = 0;; iter++) {
-            indexReader.reset();
             List<IndexQuery> queries = indexReader.createQueries(searchContext);
 
             long start = System.nanoTime();
             for (var query : queries) {
-
                 while (query.hasMore()) {
                     query.getMoreResults(buffer);
                     sum1 += buffer.end;
                     buffer.reset();
                 }
-
-                query.printDebugInformation();
             }
             long end = System.nanoTime();
             times.add((end - start)/1_000_000_000.);
+
+            if (iter == 0) {
+                for (var query : queries) {
+                    query.printDebugInformation();
+                }
+            }
 
             if ((iter % 10) == 0) {
                 if (Instant.now().isAfter(runEndTime)) {

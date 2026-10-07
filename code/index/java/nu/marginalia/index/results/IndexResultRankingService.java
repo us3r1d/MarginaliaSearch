@@ -16,7 +16,7 @@ import nu.marginalia.index.ScratchIntListPool;
 import nu.marginalia.index.StatefulIndex;
 import nu.marginalia.index.forward.spans.DocumentSpans;
 import nu.marginalia.index.model.*;
-import nu.marginalia.index.searchset.connectivity.DomainSetConnectivity;
+import nu.marginalia.ranking.connectivity.DomainSetConnectivity;
 import nu.marginalia.language.sentence.tag.HtmlTag;
 import nu.marginalia.linkdb.docs.DocumentDbReader;
 import nu.marginalia.model.crawl.HtmlFeature;
@@ -93,10 +93,10 @@ public class IndexResultRankingService {
         }
 
         long docId = UrlIdCodec.removeRank(combinedId);
-        long docMetadata = index.getDocumentMetadata(combinedId);
-        int htmlFeatures = index.getHtmlFeatures(combinedId);
+        long docMetadata = document.docMetadata;
+        int htmlFeatures = document.htmlFeatures;
 
-        int docSize = index.getDocumentSize(combinedId);
+        int docSize = document.docSize;
         if (docSize <= 0) docSize = 5000;
 
         var params = rankingContext.params;
@@ -202,6 +202,7 @@ public class IndexResultRankingService {
         }
 
         SearchResultItem ret = new SearchResultItem(combinedId,
+                rankingContext.nodeId,
                 docMetadata,
                 htmlFeatures,
                 score,
@@ -245,9 +246,6 @@ public class IndexResultRankingService {
         else if (queryStrategy == QueryStrategy.REQUIRE_FIELD_DOMAIN) {
             return WordFlags.UrlDomain.isPresent(flags);
         }
-        else if (queryStrategy == QueryStrategy.REQUIRE_FIELD_LINK) {
-            return WordFlags.ExternalLink.isPresent(flags);
-        }
         return true;
     }
 
@@ -289,7 +287,7 @@ public class IndexResultRankingService {
         int size = DocumentMetadata.decodeSize(documentMetadata);
         if (size == 0) size = 10_000;
 
-        int flagsPenalty = flagsPenalty(features, documentMetadata & 0xFF, size);
+        double flagsPenalty = flagsPenalty(features, documentMetadata & 0xFF, size);
         int topology = DocumentMetadata.decodeTopology(documentMetadata);
         int year = DocumentMetadata.decodeYear(documentMetadata);
 
@@ -404,6 +402,14 @@ public class IndexResultRankingService {
         private static final float[] weights_partial;
         private static final float[] attenuation;
 
+        private static final float single_exactTitle = 4.0f;
+        private static final float single_titleBoundary = 2.5f;
+        private static final float single_titleContained = 1.0f;
+        private static final float single_exactHeading = 0.75f;
+        private static final float single_boundaryHeading = 0.75f;
+        private static final float single_linkTextExact = 1.5f;
+        private static final float single_linkTextPartial = 0.5f;
+
         static {
             weights_full = new float[HtmlTag.includedTags.length];
             weights_partial = new float[HtmlTag.includedTags.length];
@@ -510,7 +516,7 @@ public class IndexResultRankingService {
 
             // Handle matches that span multiple tags; treat them as BODY matches
             if (totalFullCnts != fullGroupIntersections.size()) {
-                int mixedCnts = fullGroupIntersections.size() - totalFullCnts;
+                int mixedCnts = Math.max(1, fullGroupIntersections.size() - totalFullCnts);
                 score += (float) (weights_full[HtmlTag.BODY.ordinal()] * fullGroup.size
                         * (1 + Math.log(1 + Math.pow(mixedCnts, attenuation[HtmlTag.BODY.ordinal()]))));
             }
@@ -521,6 +527,7 @@ public class IndexResultRankingService {
             if (titleBoundaryMatches > 0) {
                 score += 1.5f * titleBoundaryMatches;
             }
+
 
             return score;
         }
@@ -538,24 +545,56 @@ public class IndexResultRankingService {
 
             float score = 0.f;
 
+            // For single term queries, we focus mostly on link text matching and title matching,
+            // as body matches aren't super informative and will be caught by the BM25 signal anyway.
+
             var titleSpan = spans.getSpan(HtmlTag.TITLE);
-            if (titleSpan.length() == fullGroup.size
-                    && titleSpan.containsRange(fullGroupIntersections, fullGroup.size))
-            {
-                score += 4; // If the title is a single word and the same as the query, we give it a verbatim bonus
+            int titleLength = titleSpan.length();
+
+            if (titleSpan.countRangeMatchesExact(fullGroupIntersections, fullGroup.size) > 0) {
+                // The title is the term and nothing else
+                score += single_exactTitle;
+                matches.set(HtmlTag.TITLE.ordinal());
+            }
+            else if (titleSpan.countRangeMatchesAtBoundary(fullGroupIntersections, fullGroup.size) > 0) {
+                // The term leads or ends the title, a weaker aboutness signal the longer the title is
+                score += single_titleBoundary / (float) Math.sqrt(titleLength);
+                matches.set(HtmlTag.TITLE.ordinal());
+            }
+            else if (titleSpan.containsRange(fullGroupIntersections, fullGroup.size)) {
+                score += single_titleContained / (float) Math.sqrt(titleLength);
+                matches.set(HtmlTag.TITLE.ordinal());
             }
 
-            int exactMatches = spans
-                    .getSpan(HtmlTag.EXTERNAL_LINKTEXT)
-                    .countRangeMatchesExact(fullGroupIntersections, fullGroup.size);
+            var headingsSpan = spans.getSpan(HtmlTag.HEADING);
+            int exactHeadings = headingsSpan.countRangeMatchesExact(fullGroupIntersections, fullGroup.size);
+            if (exactHeadings > 0) {
+                // Headings consisting of the term alone, attenuated so documents stuffed
+                // with one-word headings don't accumulate unbounded credit
+                score += single_exactHeading * (float) Math.sqrt(exactHeadings);
+                matches.set(HtmlTag.HEADING.ordinal());
+            }
 
-            int partialMatches = spans
-                    .getSpan(HtmlTag.EXTERNAL_LINKTEXT)
-                    .countRangeMatches(fullGroupIntersections, fullGroup.size);
+            int boundaryHeadings = headingsSpan.countRangeMatchesAtBoundary(fullGroupIntersections, fullGroup.size);
+            if (boundaryHeadings > 0) {
+                score += single_boundaryHeading * (float) Math.sqrt(boundaryHeadings);
+                matches.set(HtmlTag.HEADING.ordinal());
+            }
 
-            partialMatches -= exactMatches;
+            var linkSpan = spans.getSpan(HtmlTag.EXTERNAL_LINKTEXT);
+            int exactLinks = linkSpan.countRangeMatchesExact(fullGroupIntersections, fullGroup.size);
+            int partialLinks = linkSpan.countRangeMatches(fullGroupIntersections, fullGroup.size) - exactLinks;
 
-            score += 1.5 * exactMatches + 0.5 * partialMatches;
+            // Anchor text is the strongest aboutness signal available for a single term, but
+            // is likewise attenuated so heavily linked pages don't swamp the other factors
+            if (exactLinks > 0) {
+                score += single_linkTextExact * (float) exactLinks;
+                matches.set(HtmlTag.EXTERNAL_LINKTEXT.ordinal());
+            }
+            if (partialLinks > 0) {
+                score += single_linkTextPartial * (float) Math.sqrt(partialLinks);
+                matches.set(HtmlTag.EXTERNAL_LINKTEXT.ordinal());
+            }
 
             return score;
         }
@@ -588,7 +627,7 @@ public class IndexResultRankingService {
 
             // Handle matches that span multiple tags; treat them as BODY matches
             if (totalCnts != intersections.size()) {
-                int mixedCnts = intersections.size() - totalCnts;
+                int mixedCnts = Math.max(1, intersections.size() - totalCnts);
                 score += (float) (weights_partial[HtmlTag.BODY.ordinal()] * optionalGroup.size * sizeScalingFactor
                                     * (1 + Math.log(1 + Math.pow(mixedCnts, attenuation[HtmlTag.BODY.ordinal()]))));
             }
@@ -683,7 +722,7 @@ public class IndexResultRankingService {
         }
     }
 
-    private int flagsPenalty(int featureFlags, long docFlags, int size) {
+    private double flagsPenalty(int featureFlags, long docFlags, int size) {
 
         // Short-circuit for index-service, which does not have the feature flags
         if (featureFlags == 0)

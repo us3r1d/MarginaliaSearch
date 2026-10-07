@@ -65,6 +65,11 @@ public class QueryFactory {
             basicQuery.clear();
         }
 
+        if (countWords(basicQuery) > MAX_QUERY_WORDS) {
+            problems.add("Your search query is too long");
+            basicQuery.clear();
+        }
+
         SearchQuery.SearchQueryBuilder queryBuilder = SearchQuery.builder();
 
         SpecificationLimit qualityLimit = searchFilter.quality();
@@ -97,18 +102,26 @@ public class QueryFactory {
                         parts[i] = part;
                     }
 
+                    // Tokens that are never indexed must not become required terms
+                    List<String> searchableParts = new ArrayList<>(parts.length);
+                    for (String part : parts) {
+                        if (!WordPatterns.isStopWord(part) && !WordPatterns.isDiscardedByTokenizer(part)) {
+                            searchableParts.add(part);
+                        }
+                    }
+
                     if (parts.length > 1) {
                         // Require that the terms appear in sequence
                         queryBuilder.phraseConstraint(SearchPhraseConstraint.mandatory(parts));
 
                         // Construct a regular query from the parts in the quoted string
-                        queryBuilder.queryTerms(parts);
+                        queryBuilder.queryTerms(searchableParts.toArray(String[]::new));
 
                         // Prefer that the actual n-gram is present
                         queryBuilder.priority(str, 1.0f);
-                    } else {
+                    } else if (!searchableParts.isEmpty()) {
                         // If the quoted word is a single word, we don't need to do more than include it in the search
-                        queryBuilder.queryTerms(str);
+                        queryBuilder.queryTerms(searchableParts.getFirst());
                     }
                 }
 
@@ -116,10 +129,18 @@ public class QueryFactory {
                     analyzeSearchTerm(problems, str, displayStr);
                     searchTermsHuman.addAll(Arrays.asList(displayStr.split("\\s+")));
 
-                    queryBuilder.queryTerms(str);
+                    if (!WordPatterns.isDiscardedByTokenizer(str)) {
+                        queryBuilder.queryTerms(str);
+                    }
                 }
 
                 case QueryToken.ExcludeTerm(String str, _) -> queryBuilder.exclude(str);
+                case QueryToken.ExcludePhrase(String str, _) -> {
+                    // We don't support excluding sentences so this is a bit of a stopgap
+                    for (String part : StringUtils.split(str, '_')) {
+                        queryBuilder.exclude(part);
+                    }
+                }
                 case QueryToken.PriorityTerm(String str, _) -> queryBuilder.priority(str, 1.0f);
                 case QueryToken.AdviceTerm(String str, _) when str.startsWith("site:*.") -> {
                     String prefix = "site:*.";
@@ -232,6 +253,16 @@ public class QueryFactory {
         return new ProcessedQuery(indexQueryBuilder.build(), searchTermsHuman, domain, request.getLangIsoCode());
     }
 
+    private static final int MAX_QUERY_WORDS = 32;
+
+    private static int countWords(List<QueryToken> tokens) {
+        int words = 0;
+        for (QueryToken t : tokens) {
+            words += 1 + StringUtils.countMatches(t.str(), '_');
+        }
+        return words;
+    }
+
     private void analyzeSearchTerm(List<String> problems, String str, String displayStr) {
         final String word = str;
 
@@ -251,7 +282,6 @@ public class QueryFactory {
             case "RF_SITE" -> QueryStrategy.REQUIRE_FIELD_SITE;
             case "RF_URL" -> QueryStrategy.REQUIRE_FIELD_URL;
             case "RF_DOMAIN" -> QueryStrategy.REQUIRE_FIELD_DOMAIN;
-            case "RF_LINK" -> QueryStrategy.REQUIRE_FIELD_LINK;
             case "SENTENCE" -> QueryStrategy.SENTENCE;
             case "TOPIC" -> QueryStrategy.TOPIC;
             default -> QueryStrategy.AUTO;

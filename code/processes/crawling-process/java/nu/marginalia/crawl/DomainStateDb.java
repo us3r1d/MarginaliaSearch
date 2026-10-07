@@ -13,6 +13,9 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -222,6 +225,52 @@ public class DomainStateDb implements AutoCloseable {
             stmt.executeUpdate();
         } catch (SQLException e) {
             logger.error("Failed to insert summary record", e);
+        }
+    }
+
+    /** Return the last full crawl time (epoch millis) for every domain recorded in this crawl set.
+     */
+    public Map<String, Long> getLastFullCrawlTimes() {
+        Map<String, Long> lastCrawlTimes = new HashMap<>();
+
+        if (connection == null)
+            return lastCrawlTimes;
+
+        try (var stmt = connection.prepareStatement("SELECT domain, lastFullCrawlEpochMs FROM crawl_meta")) {
+            var rs = stmt.executeQuery();
+            while (rs.next()) {
+                lastCrawlTimes.put(rs.getString("domain"), rs.getLong("lastFullCrawlEpochMs"));
+            }
+        } catch (SQLException ex) {
+            logger.error("Failed to read last full crawl times", ex);
+        }
+
+        return lastCrawlTimes;
+    }
+
+    public void deleteDomain(String domainName) {
+        if (connection == null)
+            return;
+
+        try (var stmt = connection.prepareStatement("DELETE FROM crawl_meta WHERE domain = ?")) {
+            stmt.setString(1, domainName);
+            stmt.executeUpdate();
+        } catch (SQLException ex) {
+            logger.error("Failed to delete crawl_meta state for {}", domainName, ex);
+        }
+
+        try (var stmt = connection.prepareStatement("DELETE FROM summary WHERE domain = ?")) {
+            stmt.setString(1, domainName);
+            stmt.executeUpdate();
+        } catch (SQLException ex) {
+            logger.error("Failed to delete summary state for {}", domainName, ex);
+        }
+
+        try (var stmt = connection.prepareStatement("DELETE FROM favicon WHERE domain = ?")) {
+            stmt.setString(1, domainName);
+            stmt.executeUpdate();
+        } catch (SQLException ex) {
+            logger.error("Failed to delete favicon state for {}", domainName, ex);
         }
     }
 

@@ -50,8 +50,6 @@ public class ClusteredUrlDetails implements Comparable<ClusteredUrlDetails> {
                     continue;
                 if (keywordScore.hasTermFlag(WordFlags.Title))
                     return false;
-                if (keywordScore.hasTermFlag(WordFlags.ExternalLink))
-                    return false;
                 if (keywordScore.hasTermFlag(WordFlags.UrlDomain))
                     return false;
                 if (keywordScore.hasTermFlag(WordFlags.UrlPath))
@@ -91,7 +89,7 @@ public class ClusteredUrlDetails implements Comparable<ClusteredUrlDetails> {
 
 
     public EdgeDomain getDomain() {
-        return first.url.getDomain();
+        return first.getUrl().getDomain();
     }
 
     public boolean hasMultiple() {

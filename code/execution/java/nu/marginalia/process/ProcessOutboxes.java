@@ -13,8 +13,10 @@ public class ProcessOutboxes {
     private final MqOutbox loaderOutbox;
     private final MqOutbox crawlerOutbox;
     private final MqOutbox indexConstructorOutbox;
+    private final MqOutbox rankingConstructorOutbox;
     private final MqOutbox liveCrawlerOutbox;
     private final MqOutbox exportTasksOutbox;
+    private final MqOutbox ndpOutbox;
 
     @Inject
     public ProcessOutboxes(BaseServiceParams params, MqPersistence persistence) {
@@ -47,6 +49,14 @@ public class ProcessOutboxes {
                 params.configuration.instanceUuid()
         );
 
+        rankingConstructorOutbox = new MqOutbox(persistence,
+                ProcessInboxNames.RANKING_CONSTRUCTOR_INBOX,
+                params.configuration.node(),
+                params.configuration.serviceName(),
+                params.configuration.node(),
+                params.configuration.instanceUuid()
+        );
+
         liveCrawlerOutbox = new MqOutbox(persistence,
                 ProcessInboxNames.LIVE_CRAWLER_INBOX,
                 params.configuration.node(),
@@ -57,6 +67,14 @@ public class ProcessOutboxes {
 
         exportTasksOutbox = new MqOutbox(persistence,
                 ProcessInboxNames.EXPORT_TASK_INBOX,
+                params.configuration.node(),
+                params.configuration.serviceName(),
+                params.configuration.node(),
+                params.configuration.instanceUuid()
+        );
+
+        ndpOutbox = new MqOutbox(persistence,
+                ProcessInboxNames.NDP_INBOX,
                 params.configuration.node(),
                 params.configuration.serviceName(),
                 params.configuration.node(),
@@ -79,7 +97,11 @@ public class ProcessOutboxes {
 
     public MqOutbox getIndexConstructorOutbox() { return indexConstructorOutbox; }
 
+    public MqOutbox getRankingConstructorOutbox() { return rankingConstructorOutbox; }
+
     public MqOutbox getLiveCrawlerOutbox() { return liveCrawlerOutbox; }
 
     public MqOutbox getExportTasksOutbox() { return exportTasksOutbox; }
+
+    public MqOutbox getNdpOutbox() { return ndpOutbox; }
 }

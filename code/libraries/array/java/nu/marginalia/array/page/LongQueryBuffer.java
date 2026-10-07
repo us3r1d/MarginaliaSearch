@@ -1,11 +1,7 @@
 package nu.marginalia.array.page;
 
-import nu.marginalia.array.LongArray;
-import nu.marginalia.array.LongArrayFactory;
-
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 /** A buffer for long values that can be used to filter and manipulate the data.
@@ -18,55 +14,49 @@ import java.util.Arrays;
  * <p></p>
  * Filtering is done via the methods {@link #rejectAndAdvance()}, {@link #retainAndAdvance()},
  * and {@link #finalizeFiltering()}.
- *
  */
 public class LongQueryBuffer {
     /** Direct access to the data in the buffer,
      * guaranteed to be populated until `end` */
-    public final LongArray data;
+    public final long[] data;
 
     /** Number of items in the data buffer */
     public int end;
 
+    private final long[] retained;
+
     private int read = 0;
     private int write = 0;
-
-    private LongQueryBuffer(LongArray array, int size) {
-        this.data = array;
-        this.end = size;
-    }
+    private int rejected = 0;
 
     public LongQueryBuffer(int size) {
-        this.data = LongArrayFactory.onHeapConfined(size);
+        this.data = new long[size];
+        this.retained = new long[size];
         this.end = 0;
     }
 
     public LongQueryBuffer(long[] data, int size) {
-        this.data = LongArrayFactory.onHeapConfined(size);
-        this.data.set(0, data);
+        this.data = data;
+        this.retained = new long[data.length];
         this.end = size;
     }
 
     public long[] copyData() {
-        long[] copy = new long[end];
-        data.forEach(0, end, (pos, val) -> copy[(int)pos]=val );
-        return copy;
+        return Arrays.copyOf(data, end);
     }
 
     public long[] copyFilterData() {
-        long[] copy = new long[write];
-        data.forEach(0, write, (pos, val) -> copy[(int)pos]=val );
-        return copy;
+        return Arrays.copyOf(retained, write);
     }
 
     public boolean fitsMore() {
-        return end < data.size();
+        return end < data.length;
     }
 
     public int addData(MemorySegment source, long sourceOffset, int nMax) {
-        int n = Math.min(nMax, (int) data.size() - end);
+        int n = Math.min(nMax, data.length - end);
 
-        MemorySegment.copy(source, ValueLayout.JAVA_LONG, sourceOffset, data.getMemorySegment(), ValueLayout.JAVA_LONG, 8L * end, n);
+        MemorySegment.copy(source, ValueLayout.JAVA_LONG, sourceOffset, data, end, n);
 
         end += n;
 
@@ -74,17 +64,13 @@ public class LongQueryBuffer {
     }
 
     public int addData(long[] newData, int start, int nMax) {
-        int n = Math.min(nMax, (int) data.size() - end);
+        int n = Math.min(nMax, data.length - end);
 
-        MemorySegment.copy(newData, start, data.getMemorySegment(), ValueLayout.JAVA_LONG, 8L*end, n);
+        System.arraycopy(newData, start, data, end, n);
 
         end += n;
 
         return n;
-    }
-    /** Dispose of the buffer and release resources */
-    public void dispose() {
-        data.close();
     }
 
     public boolean isEmpty() {
@@ -96,19 +82,19 @@ public class LongQueryBuffer {
     }
 
     public void reset() {
-        end = (int) data.size();
-        read = 0;
-        write = 0;
+        end = data.length;
+        resetFiltering();
     }
 
     public void zero() {
         end = 0;
-        read = 0;
-        write = 0;
+        resetFiltering();
     }
 
-    public LongQueryBuffer slice(int start, int end) {
-        return new LongQueryBuffer(data.range(start, end), end - start);
+    private void resetFiltering() {
+        read = 0;
+        write = 0;
+        rejected = 0;
     }
 
     /* ==  Filtering methods == */
@@ -116,50 +102,38 @@ public class LongQueryBuffer {
     /** Returns the current value at the read pointer.
      */
     public long currentValue() {
-        return data.get(read);
+        return data[read];
     }
 
-    /** Peeking ahead, return the first value in the buffer
-     * larger than target, or Long.MIN_VALUE if no such value is found.
+    /** Rejects the current value and advances the read pointer, returning true if there are more
+     *  values to read.  Rejected values are compacted in order at the front of the data,
+     *  so that they can be evaluated against another filter.
      */
-    public long peekValueLt(long target) {
-        int pos = (int) data.binarySearchStrictlyLT(target, read, end);
-        if (pos == end)
-            return Long.MIN_VALUE;
-        return data.get(pos);
-    }
-
-    /** Advances the read pointer and returns true if there are more values to read. */
     public boolean rejectAndAdvance() {
         assert read < end;
-        assert write < end;
+        assert rejected <= read;
+
+        data[rejected++] = data[read];
 
         return ++read < end;
     }
 
     public boolean isAscending() {
         for (int i = read + 1; i < end; i++) {
-            if (data.get(i-1) > data.get(i))
+            if (data[i-1] > data[i])
                 return false;
         }
         return true;
     }
+
     /** Retains the current value at the read pointer and advances the read and write pointers.
      *  Returns true if there are more values to read.
-     *  <p></p> To enable "or" style criterias, the method swaps the current value with the value
-     *  at the write pointer, so that it's retained at the end of the buffer.
      */
     public boolean retainAndAdvance() {
         assert read < end;
-        assert write < end;
+        assert write < retained.length;
 
-        if (read != write) {
-            long tmp = data.get(write);
-            data.set(write, data.get(read));
-            data.set(read, tmp);
-        }
-
-        write++;
+        retained[write++] = data[read];
 
         return ++read < end;
     }
@@ -169,7 +143,8 @@ public class LongQueryBuffer {
      * as though all values were retained.
      */
     public void retainAll() {
-        write = end;
+        System.arraycopy(data, read, retained, write, end - read);
+        write += end - read;
         read = end;
     }
 
@@ -187,31 +162,32 @@ public class LongQueryBuffer {
      * At this point the buffer can either be read, or additional filtering can be applied.
      */
     public void finalizeFiltering() {
+        System.arraycopy(retained, 0, data, 0, write);
+
         end = write;
-        read = 0;
-        write = 0;
+        resetFiltering();
     }
 
-    /** Finalizes the filtering by setting the end pointer to the write pointer,
-     * and resetting the read and write pointers to zero.  This version of the function
-     * also sorts the data as it needs to be ascending for subsequent filtering passes.
+    /** Finalizes a multipass filter.  Each pass retains its values in order, but later
+     * passes retain values that sort before earlier ones, so the retained values are
+     * sorted to keep the buffer ascending for subsequent filtering.
      * <p></p>
      * At this point the buffer can either be read, or additional filtering can be applied.
      */
     public void finalizeMultipass() {
-        data.sort(0, write);
+        Arrays.sort(retained, 0, write);
+        System.arraycopy(retained, 0, data, 0, write);
 
         end = write;
-        read = 0;
-        write = 0;
+        resetFiltering();
     }
-
 
     /** Resets the buffer so that the rejected values can be re-evaluated with another filter */
     public void tryOther() {
-        read = write;
+        end = rejected;
+        read = 0;
+        rejected = 0;
     }
-
 
     /**  Retain only unique values in the buffer, and update the end pointer to the new length.
      * <p></p>
@@ -239,11 +215,6 @@ public class LongQueryBuffer {
         finalizeFiltering();
     }
 
-    @SuppressWarnings("preview")
-    public ByteBuffer asByteBuffer() {
-        return data.getMemorySegment().asByteBuffer();
-    }
-
     public String toString() {
         return getClass().getSimpleName() + "[" +
             "read = " + read +
@@ -251,6 +222,4 @@ public class LongQueryBuffer {
             ",end = " + end +
             ",data = [" + Arrays.toString(copyData()) + "]]";
     }
-
-
 }

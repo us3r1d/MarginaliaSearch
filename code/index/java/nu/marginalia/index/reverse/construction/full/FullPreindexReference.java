@@ -12,25 +12,27 @@ import java.nio.file.Path;
 public record FullPreindexReference(
         Path wordsFile,
         Path countsFile,
-        Path documentsFile
+        Path documentsFile,
+        boolean compressed
 )
 {
     public FullPreindexReference(FullPreindexWordSegments segments, FullPreindexDocuments documents) {
-        this(segments.wordsFile, segments.countsFile, documents.file);
+        this(segments.wordsFile, segments.countsFile, documents.file, documents.isCompressed());
+    }
+
+    public FullPreindexReference(Path wordsFile, Path countsFile, Path documentsFile) {
+        this(wordsFile, countsFile, documentsFile, false);
     }
 
     public FullPreindex open() throws IOException {
         return new FullPreindex(
             new FullPreindexWordSegments(
-                    LongArrayFactory.mmapForModifyingShared(wordsFile),
-                    LongArrayFactory.mmapForModifyingShared(countsFile),
+                    LongArrayFactory.mmapForReadingShared(wordsFile),
+                    LongArrayFactory.mmapForReadingShared(countsFile),
                     wordsFile,
                     countsFile
             ),
-            new FullPreindexDocuments(
-                    LongArrayFactory.mmapForModifyingShared(documentsFile),
-                    documentsFile
-            )
+            FullPreindexDocuments.open(documentsFile, compressed)
         );
     }
 }

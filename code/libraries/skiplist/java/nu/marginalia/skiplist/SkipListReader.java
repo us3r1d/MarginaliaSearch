@@ -5,27 +5,38 @@ import it.unimi.dsi.fastutil.longs.LongList;
 import nu.marginalia.array.page.LongQueryBuffer;
 import nu.marginalia.array.pool.BufferPool;
 import nu.marginalia.array.pool.MemoryPage;
+import nu.marginalia.ffi.NativeAlgos;
 import nu.marginalia.skiplist.compression.DocIdCompressor;
 import nu.marginalia.skiplist.compression.output.SegmentCompressorBuffer;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.SegmentAllocator;
 import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static nu.marginalia.skiplist.SkipListConstants.*;
 
 public class SkipListReader {
 
+    /** Block readahead when there is weak evidence of a sequential pattern, should be ∈{0,1} probably */
+    public static final int BLOCK_READ_AHEAD_MIN = Integer.getInteger("index.blockReadAheadMin", 1);
+
+    /** Block readahead when we have indications of a sequential read pattern */
+    public static final int BLOCK_READ_AHEAD_MAX = Integer.getInteger("index.blockReadAheadMax", 8);
+
     static final int BLOCK_STRIDE = BLOCK_SIZE;
 
     private final BufferPool indexPool;
     private final SkipListValueReader valuesReader;
+    private final SkipListFormat format;
 
     private final long blockStart;
 
@@ -35,17 +46,81 @@ public class SkipListReader {
 
     private boolean atEnd;
 
-    private long lastDecompressedBlock = -1;
-    private final long[] decompressedData = new long[BLOCK_SIZE];
+    private int sequentialReadsObserved;
 
-    public int[] __stats_match_histo_retain = new int[512];
-    public int[] __stats_match_histo_reject = new int[512];
+    private static final int DECOMPRESSED_BLOCK_POOL_SIZE = 128;
+
+    private static final AtomicLong readerSequence = new AtomicLong();
+
+    private static final class DecompressedBlock {
+        public final long[] data = new long[BLOCK_SIZE];
+        private final DecompressedBlockPool pool;
+
+        private long ownerId = -1;
+        private long block = -1;
+
+        DecompressedBlock(DecompressedBlockPool pool) {
+            this.pool = pool;
+        }
+    }
+
+    private static final class DecompressedBlockPool {
+        private final DecompressedBlock[] blocks = new DecompressedBlock[DECOMPRESSED_BLOCK_POOL_SIZE];
+        private int next = 0;
+
+        DecompressedBlock claim(long readerId) {
+            DecompressedBlock scratch = blocks[next];
+            if (scratch == null) {
+                scratch = new DecompressedBlock(this);
+                blocks[next] = scratch;
+            }
+            next = (next + 1) % blocks.length;
+
+            scratch.ownerId = readerId;
+            scratch.block = -1;
+
+            return scratch;
+        }
+    }
+
+    private static final ThreadLocal<DecompressedBlockPool> decompressedBlockPool = ThreadLocal.withInitial(DecompressedBlockPool::new);
+
+    private final long readerId = readerSequence.incrementAndGet();
+    private DecompressedBlock decompressedBlock;
+
+    private long[] decompressBlock(MemoryPage page, int dataOffset, int n) {
+        DecompressedBlockPool pool = decompressedBlockPool.get();
+        DecompressedBlock scratch = decompressedBlock;
+
+        if (scratch == null || scratch.ownerId != readerId || scratch.pool != pool) {
+            scratch = pool.claim(readerId);
+            decompressedBlock = scratch;
+        }
+
+        if (scratch.block != currentBlock) {
+            DocIdCompressor.decompress(
+                    new SegmentCompressorBuffer(page.getMemorySegment(), dataOffset),
+                    n,
+                    scratch.data);
+            scratch.block = currentBlock;
+        }
+
+        return scratch.data;
+    }
 
     public SkipListReader(BufferPool indexPool,
                           SkipListValueReader valuesReader,
                           long blockStart) {
+        this(indexPool, valuesReader, blockStart, SkipListFormat.CURRENT);
+    }
+
+    public SkipListReader(BufferPool indexPool,
+                          SkipListValueReader valuesReader,
+                          long blockStart,
+                          SkipListFormat format) {
         this.indexPool = indexPool;
         this.valuesReader = valuesReader;
+        this.format = format;
         this.blockStart = blockStart;
 
         currentBlock = blockStart & -BLOCK_SIZE;
@@ -60,6 +135,7 @@ public class SkipListReader {
         currentBlock = blockStart & -BLOCK_SIZE;
         currentBlockOffset = (int) (blockStart & (BLOCK_SIZE - 1));
         currentBlockIdx = 0;
+        sequentialReadsObserved = 0;
 
         atEnd = false;
     }
@@ -72,7 +148,7 @@ public class SkipListReader {
         try (var page = indexPool.get(currentBlock)) {
             int fc = headerForwardCount(page, currentBlockOffset);
             if (fc > 0) {
-                return MAX_RECORDS_PER_BLOCK * skipOffsetForPointer(fc);
+                return MAX_RECORDS_PER_BLOCK * format.skipOffsetForPointer(fc);
             }
             else {
                 return headerNumRecords(page, currentBlockOffset);
@@ -87,10 +163,15 @@ public class SkipListReader {
     public boolean tryRetainData(@NotNull LongQueryBuffer data) {
         assert data.isAscending();
 
-        if (atEnd) return false;
+        if (atEnd) {
+            while (data.hasMore())
+                data.rejectAndAdvance();
+            return false;
+        }
+
         if (!data.hasMore()) return false;
 
-        try (var page = indexPool.get(currentBlock)) {
+        try (var page = indexPool.get(currentBlock, readAhead())) {
 
             int n = headerNumRecords(page, currentBlockOffset);
             int fc = headerForwardCount(page, currentBlockOffset);
@@ -99,26 +180,13 @@ public class SkipListReader {
             int dataOffset = pageDataOffset(currentBlockOffset, fc);
 
             long maxVal;
-            long nextBlock;
 
             if (FLAG_COMPRESSED_BLOCK == (flags & FLAG_COMPRESSED_BLOCK)) {
-                if (lastDecompressedBlock != currentBlock) {
-                    SegmentCompressorBuffer buffer = new SegmentCompressorBuffer(page.getMemorySegment(), dataOffset);
-                    DocIdCompressor.decompress(buffer, n, decompressedData);
-                    lastDecompressedBlock = currentBlock;
-                }
-
+                long[] decompressedData = decompressBlock(page, dataOffset, n);
                 maxVal = decompressedData[n-1];
             }
             else {
                 maxVal = maxValueInBlock(page, fc, n);
-            }
-
-            if (data.peekValueLt(maxVal) > maxVal) {
-                nextBlock = findNextBlock(page, fc, maxVal);
-            }
-            else {
-                nextBlock = currentBlock + BLOCK_STRIDE;
             }
 
             if (data.currentValue() > maxVal || retainInPage(page, flags, dataOffset, n, data)) {
@@ -128,6 +196,24 @@ public class SkipListReader {
                         data.rejectAndAdvance();
                     return false;
                 }
+
+                // Consuming the block leaves the read pointer on the first value beyond
+                // it, which is the value the forward pointers should be probed with
+                long nextBlock;
+                if (data.hasMore() && data.currentValue() > maxVal) {
+                    nextBlock = findNextBlock(page, fc, data.currentValue());
+                }
+                else {
+                    nextBlock = currentBlock + BLOCK_STRIDE;
+                }
+
+                if (nextBlock == currentBlock + BLOCK_STRIDE) {
+                    sequentialReadsObserved++;
+                }
+                else {
+                    sequentialReadsObserved = 0;
+                }
+
 
                 currentBlockOffset = 0;
                 currentBlockIdx = 0;
@@ -158,8 +244,6 @@ public class SkipListReader {
 
     boolean retainInPage_Plain(MemoryPage page, int dataOffset, int n, LongQueryBuffer data) {
 
-        int matches = 0;
-
         while (data.hasMore()
                 && n > (currentBlockIdx = page.binarySearchLong(data.currentValue(), dataOffset, currentBlockIdx, n)))
         {
@@ -168,7 +252,6 @@ public class SkipListReader {
             }
             else {
                 data.retainAndAdvance();
-                matches++;
                 break;
             }
         }
@@ -185,7 +268,6 @@ public class SkipListReader {
                 }
                 else if (bv == pv) {
                     data.retainAndAdvance();
-                    matches++;
                     currentBlockIdx++;
                     continue outer;
                 }
@@ -193,14 +275,11 @@ public class SkipListReader {
             break;
         }
 
-        __stats_match_histo_retain[Math.min(matches, __stats_match_histo_retain.length-1)]++;
-
         return currentBlockIdx >= n;
     }
 
     boolean retainInPage_Compressed(int n, LongQueryBuffer data) {
-
-        int matches = 0;
+        long[] decompressedData = decompressedBlock.data;
 
         while (data.hasMore()
                 && n > (currentBlockIdx = binarySearchUB(decompressedData, data.currentValue(), currentBlockIdx, n)))
@@ -210,7 +289,6 @@ public class SkipListReader {
             }
             else {
                 data.retainAndAdvance();
-                matches++;
                 break;
             }
         }
@@ -227,15 +305,12 @@ public class SkipListReader {
                 }
                 else if (bv == pv) {
                     data.retainAndAdvance();
-                    matches++;
                     currentBlockIdx++;
                     continue outer;
                 }
             }
             break;
         }
-
-        __stats_match_histo_retain[Math.min(matches, __stats_match_histo_retain.length-1)]++;
 
         return currentBlockIdx >= n;
     }
@@ -248,9 +323,9 @@ public class SkipListReader {
     public boolean tryRejectData(@NotNull LongQueryBuffer data) {
         assert data.isAscending();
 
-        assert data.isAscending();
+        if (!data.hasMore()) return false;
 
-        try (var page = indexPool.get(currentBlock)) {
+        try (var page = indexPool.get(currentBlock, readAhead())) {
 
             int n = headerNumRecords(page, currentBlockOffset);
             int fc = headerForwardCount(page, currentBlockOffset);
@@ -260,24 +335,11 @@ public class SkipListReader {
 
             long maxVal;
             if (FLAG_COMPRESSED_BLOCK == (flags & FLAG_COMPRESSED_BLOCK)) {
-                if (lastDecompressedBlock != currentBlock) {
-                    SegmentCompressorBuffer buffer = new SegmentCompressorBuffer(page.getMemorySegment(), dataOffset);
-                    DocIdCompressor.decompress(buffer, n, decompressedData);
-                    lastDecompressedBlock = currentBlock;
-                }
+                long[] decompressedData = decompressBlock(page, dataOffset, n);
                 maxVal = decompressedData[n-1];
             }
             else {
                 maxVal = maxValueInBlock(page, fc, n);
-            }
-
-            long nextBlock;
-
-            if (data.peekValueLt(maxVal) > maxVal) {
-                nextBlock = findNextBlock(page, fc, maxVal);
-            }
-            else {
-                nextBlock = currentBlock + BLOCK_STRIDE;
             }
 
             if (data.currentValue() > maxVal || rejectInPage(page, flags, dataOffset, n, data)) {
@@ -286,6 +348,23 @@ public class SkipListReader {
                     while (data.hasMore())
                         data.retainAndAdvance();
                     return false;
+                }
+
+                // Consuming the block leaves the read pointer on the first value beyond
+                // it, which is the value the forward pointers should be probed with
+                long nextBlock;
+                if (data.hasMore() && data.currentValue() > maxVal) {
+                    nextBlock = findNextBlock(page, fc, data.currentValue());
+                }
+                else {
+                    nextBlock = currentBlock + BLOCK_STRIDE;
+                }
+
+                if (nextBlock == currentBlock + BLOCK_STRIDE) {
+                    sequentialReadsObserved++;
+                }
+                else {
+                    sequentialReadsObserved = 0;
                 }
 
                 currentBlockOffset = 0;
@@ -306,13 +385,7 @@ public class SkipListReader {
 
     boolean rejectInPage(MemoryPage page, int flags, int dataOffset, int n, LongQueryBuffer data) {
         if (FLAG_COMPRESSED_BLOCK == (flags & FLAG_COMPRESSED_BLOCK)) {
-
-            if (lastDecompressedBlock != currentBlock) {
-                SegmentCompressorBuffer buffer = new SegmentCompressorBuffer(page.getMemorySegment(), dataOffset);
-                DocIdCompressor.decompress(buffer, n, decompressedData);
-                lastDecompressedBlock = currentBlock;
-            }
-
+            decompressBlock(page, dataOffset, n);
             return rejectInPage_Compressed(n, data);
         }
         else {
@@ -321,8 +394,7 @@ public class SkipListReader {
     }
 
     boolean rejectInPage_Compressed(int n, LongQueryBuffer data) {
-
-        int matches = 0;
+        long[] decompressedData = decompressedBlock.data;
 
         while (data.hasMore()
                 && n > (currentBlockIdx = binarySearchUB(decompressedData, data.currentValue(), currentBlockIdx, n)))
@@ -332,7 +404,6 @@ public class SkipListReader {
             }
             else {
                 data.rejectAndAdvance();
-                matches++;
                 break;
             }
         }
@@ -349,7 +420,6 @@ public class SkipListReader {
                 }
                 else if (bv == pv) {
                     data.rejectAndAdvance();
-                    matches++;
                     currentBlockIdx++;
                     continue outer;
                 }
@@ -357,13 +427,10 @@ public class SkipListReader {
             break;
         }
 
-        __stats_match_histo_reject[Math.min(matches, __stats_match_histo_reject.length-1)]++;
         return currentBlockIdx >= n;
     }
 
     boolean rejectInPage_Plain(MemoryPage page, int dataOffset, int n, LongQueryBuffer data) {
-
-        int matches = 0;
 
         while (data.hasMore()
                 && n > (currentBlockIdx = page.binarySearchLong(data.currentValue(), dataOffset, currentBlockIdx, n)))
@@ -373,7 +440,6 @@ public class SkipListReader {
             }
             else {
                 data.rejectAndAdvance();
-                matches++;
                 break;
             }
         }
@@ -390,7 +456,6 @@ public class SkipListReader {
                 }
                 else if (bv == pv) {
                     data.rejectAndAdvance();
-                    matches++;
                     currentBlockIdx++;
                     continue outer;
                 }
@@ -398,7 +463,6 @@ public class SkipListReader {
             break;
         }
 
-        __stats_match_histo_reject[Math.min(matches, __stats_match_histo_reject.length-1)]++;
         return currentBlockIdx >= n;
     }
 
@@ -414,7 +478,7 @@ public class SkipListReader {
 
         int totalCopied = 0;
         while (dest.fitsMore() && !atEnd) {
-            try (var page = indexPool.get(currentBlock)) {
+            try (var page = indexPool.get(currentBlock, BLOCK_READ_AHEAD_MAX)) {
                 MemorySegment ms = page.getMemorySegment();
 
                 assert ms.get(ValueLayout.JAVA_INT, currentBlockOffset) != 0 : "Likely reading zero space";
@@ -431,11 +495,7 @@ public class SkipListReader {
                 int dataOffset = pageDataOffset(currentBlockOffset, fc);
 
                 if (FLAG_COMPRESSED_BLOCK == (flags & FLAG_COMPRESSED_BLOCK)) {
-                    if (lastDecompressedBlock != currentBlock) {
-                        SegmentCompressorBuffer buffer = new SegmentCompressorBuffer(page.getMemorySegment(), dataOffset);
-                        DocIdCompressor.decompress(buffer, n, decompressedData);
-                        lastDecompressedBlock = currentBlock;
-                    }
+                    long[] decompressedData = decompressBlock(page, dataOffset, n);
                     int nCopied = dest.addData(decompressedData, currentBlockIdx, n - currentBlockIdx);
                     currentBlockIdx += nCopied;
                     totalCopied += nCopied;
@@ -465,7 +525,7 @@ public class SkipListReader {
     /** Fills the buffer with keys from the index.  The caller should use
      * atEnd() to decide when the index has been exhausted.
      *
-     * @return the number of items added to the index
+     * @return the number of items added to the buffer
      * */
     public int getKeys(@NotNull LongQueryBuffer dest, @NotNull SkipListValueRanges ranges)
     {
@@ -492,17 +552,16 @@ public class SkipListReader {
                 int dataOffset = pageDataOffset(currentBlockOffset, fc);
 
                 if (FLAG_COMPRESSED_BLOCK == (flags & FLAG_COMPRESSED_BLOCK)) {
-                    if (lastDecompressedBlock != currentBlock) {
-                        SegmentCompressorBuffer buffer = new SegmentCompressorBuffer(page.getMemorySegment(), dataOffset);
-                        DocIdCompressor.decompress(buffer, n, decompressedData);
-                        lastDecompressedBlock = currentBlock;
-                    }
+                    long[] decompressedData = decompressBlock(page, dataOffset, n);
 
                     do {
                         long blockMinValue = decompressedData[currentBlockIdx];
                         long rangeEnd;
                         while ((rangeEnd = ranges.end()) < blockMinValue) {
-                            if (!ranges.next()) break outer;
+                            if (!ranges.next()) {
+                                atEnd = true;
+                                break outer;
+                            }
                         }
 
                         long rangeStart = ranges.start();
@@ -518,7 +577,11 @@ public class SkipListReader {
                             int nCopied = dest.addData(decompressedData, dataStart, dataEnd - dataStart);
 
                             totalCopied += nCopied;
-                            currentBlockIdx += nCopied;
+                            currentBlockIdx = dataStart + nCopied;
+
+                            if (nCopied < dataEnd - dataStart) {
+                                return totalCopied;
+                            }
 
                             if (dataEnd == n) {
                                 inRange = true;
@@ -528,16 +591,19 @@ public class SkipListReader {
                     } while (ranges.next());
                 }
                 else {
-                    long blockMinValue = ms.get(ValueLayout.JAVA_LONG, dataOffset);
                     do {
+                        long blockMinValue = ms.get(ValueLayout.JAVA_LONG, dataOffset + 8L * currentBlockIdx);
                         long rangeEnd;
                         while ((rangeEnd = ranges.end()) < blockMinValue) {
-                            if (!ranges.next()) break outer;
+                            if (!ranges.next()) {
+                                atEnd = true;
+                                break outer;
+                            }
                         }
 
                         long rangeStart = ranges.start();
 
-                        int dataStart = page.binarySearchLong(rangeStart, dataOffset, 0, n);
+                        int dataStart = page.binarySearchLong(rangeStart, dataOffset, currentBlockIdx, n);
 
                         if (dataStart == n) {
                             break;
@@ -545,7 +611,15 @@ public class SkipListReader {
 
                         int dataEnd = page.binarySearchLong(rangeEnd, dataOffset, dataStart, n);
                         if (dataStart != dataEnd) {
-                            totalCopied += dest.addData(ms, dataOffset + dataStart * 8L, (dataEnd - dataStart));
+                            int nCopied = dest.addData(ms, dataOffset + dataStart * 8L, dataEnd - dataStart);
+
+                            totalCopied += nCopied;
+                            currentBlockIdx = dataStart + nCopied;
+
+                            if (nCopied < dataEnd - dataStart) {
+                                return totalCopied;
+                            }
+
                             if (dataEnd == n) {
                                 inRange = true;
                                 break;
@@ -558,17 +632,12 @@ public class SkipListReader {
                 if (atEnd)
                     break;
 
-                long nextBlock = currentBlock + (long) BLOCK_STRIDE;
-                long currentValue = ranges.start();
-
-                if (!inRange) {
-                    for (int i = 0; i < fc; i++) {
-                        long nextBlockMaxValue = page.getLong(currentBlockOffset + DATA_BLOCK_HEADER_SIZE + 8 * i);
-                        nextBlock = currentBlock + (long) BLOCK_STRIDE * skipOffsetForPointer(Math.max(0, i - 1));
-                        if (nextBlockMaxValue >= currentValue) {
-                            break;
-                        }
-                    }
+                long nextBlock;
+                if (inRange) {
+                    nextBlock = currentBlock + (long) BLOCK_STRIDE;
+                }
+                else {
+                    nextBlock = findNextBlock(page, fc, ranges.start());
                 }
 
                 currentBlockOffset = 0;
@@ -582,11 +651,23 @@ public class SkipListReader {
 
 
     public class ValueReader {
-        private static final int VALUE_BLOCK_SIZE = 4096;
 
         private final int entrySize = (SkipListConstants.RECORD_SIZE - 1);
 
-        private final MemorySegment valueSegment = Arena.ofAuto().allocate(VALUE_BLOCK_SIZE, 8);
+        private final MemorySegment valueSegment;
+
+        /** Set when value blocks are to be fetched a batch at a time */
+        @Nullable
+        private final ValueBatchContext batchContext;
+
+        private final SegmentAllocator allocator;
+
+        /** Destination for a batch of value blocks, allocated on the first batched
+         *  read since most readers never make one */
+        private MemorySegment batchSlab;
+        private final long[] batchBlocks;
+        private int batchCount;
+        private int batchCursor;
 
         private final long[] inputKeys;
         private int iPos = -1;
@@ -604,13 +685,20 @@ public class SkipListReader {
             inputKeys = new long[0];
             valueOffsets = new long[0];
             outValues = new long[0];
+            valueSegment = null;
+            batchContext = null;
+            allocator = null;
+            batchBlocks = null;
         }
 
-        ValueReader(long[] inputKeys) {
+        ValueReader(SegmentAllocator allocator, long[] inputKeys, @Nullable ValueBatchContext batchContext) {
             this.inputKeys = inputKeys;
             this.valueOffsets = new long[inputKeys.length];
             this.outValues = new long[inputKeys.length * (RECORD_SIZE-1)];
-
+            this.batchContext = batchContext;
+            this.allocator = allocator;
+            this.batchBlocks = batchContext == null ? null : new long[ValueBatchContext.BATCH_BLOCKS];
+            valueSegment = allocator.allocate(VALUE_BLOCK_SIZE, 8);
         }
 
         public boolean advance() throws IOException {
@@ -643,6 +731,73 @@ public class SkipListReader {
             return iPos;
         }
 
+        /** The contents of a value block.  With a batch context the blocks the
+         *  rest of this window needs are read together on the first miss, since
+         *  their offsets are all known by then. */
+        private MemorySegment fetchBlock(long valBlock) throws IOException {
+            if (batchContext != null) {
+                MemorySegment block = heldBlock(valBlock);
+                if (block == null) {
+                    readBatch();
+                    block = heldBlock(valBlock);
+                }
+                if (block != null) {
+                    return block;
+                }
+            }
+
+            valuesReader.read(valueSegment, valBlock);
+            return valueSegment;
+        }
+
+        /** The block if this reader's last batch holds it.  Blocks are consumed in
+         *  the order they were read, so the search only moves forward. */
+        private MemorySegment heldBlock(long valBlock) {
+            for (int i = batchCursor; i < batchCount; i++) {
+                if (batchBlocks[i] == valBlock) {
+                    batchCursor = i;
+                    return batchSlab.asSlice((long) VALUE_BLOCK_SIZE * i, VALUE_BLOCK_SIZE);
+                }
+            }
+            return null;
+        }
+
+        /** Read the distinct blocks the rest of this offset window points at */
+        private void readBatch() throws IOException {
+            batchCount = 0;
+            batchCursor = 0;
+
+            long previous = Long.MIN_VALUE;
+            for (int i = vPos; i < vLen && batchCount < batchBlocks.length; i++) {
+                if (valueOffsets[i] < 0) {
+                    continue;
+                }
+
+                long block = valueOffsets[i] & -(long) VALUE_BLOCK_SIZE;
+                if (block != previous) {
+                    batchBlocks[batchCount++] = block;
+                    previous = block;
+                }
+            }
+
+            if (batchCount == 0) {
+                return;
+            }
+
+            if (batchSlab == null) {
+                batchSlab = allocator.allocate((long) VALUE_BLOCK_SIZE * batchBlocks.length, 8);
+            }
+
+            if (batchCount == 1) {
+                // A single block has nothing to overlap with, and a submission
+                // costs more than the read it would carry
+                valuesReader.read(batchSlab.asSlice(0, VALUE_BLOCK_SIZE), batchBlocks[0]);
+            }
+            else {
+                batchContext.readBlocks(batchSlab, batchBlocks, batchCount, VALUE_BLOCK_SIZE);
+            }
+        }
+
         private void copyValuesFromBlock() throws IOException {
             while (vPos < vLen && oLen == 0) {
                 if (valueOffsets[vPos] < 0) {
@@ -653,7 +808,7 @@ public class SkipListReader {
                 else {
                     long valBlock = valueOffsets[vPos] & -VALUE_BLOCK_SIZE;
 
-                    valuesReader.read(valueSegment, valBlock);
+                    MemorySegment block = fetchBlock(valBlock);
 
                     for (; vPos < vLen; vPos++) {
                         if (valueOffsets[vPos] < 0) {
@@ -668,7 +823,7 @@ public class SkipListReader {
 
                             int offsetBase = (int) (valueOffsets[vPos] & (VALUE_BLOCK_SIZE - 1));
                             for (int j = 0; j < RECORD_SIZE - 1; j++) {
-                                outValues[oLen + j] = valueSegment.get(ValueLayout.JAVA_LONG, offsetBase + 8*j);
+                                outValues[oLen + j] = block.get(ValueLayout.JAVA_LONG, offsetBase + 8*j);
                             }
                             oLen+=entrySize;
                         }
@@ -702,13 +857,19 @@ public class SkipListReader {
                         return;
 
                     if (FLAG_COMPRESSED_BLOCK == (flags & FLAG_COMPRESSED_BLOCK)) {
-                        if (lastDecompressedBlock != currentBlock) {
-                            SegmentCompressorBuffer buffer = new SegmentCompressorBuffer(page.getMemorySegment(), dataOffset);
-                            DocIdCompressor.decompress(buffer, n, decompressedData);
-                            lastDecompressedBlock = currentBlock;
-                        }
+                        if (currentBlockIdx == 0) {
+                            long packed = NativeAlgos.decompressMatch(page.getMemorySegment(), dataOffset, n,
+                                    inputKeys, offsetPos, valuesOffset, 8L * (RECORD_SIZE - 1), valueOffsets, vLen);
 
-                        readOffsetsForBlock_Compressed(n, valuesOffset);
+                            currentBlockIdx = (int) (packed >>> 32);
+                            int newOffsetPos = (int) packed;
+                            vLen += newOffsetPos - offsetPos;
+                            offsetPos = newOffsetPos;
+                        }
+                        else {
+                            decompressBlock(page, dataOffset, n);
+                            readOffsetsForBlock_Compressed(n, valuesOffset);
+                        }
                     }
                     else {
                         readOffsetsForBlock_Plain(page, n, dataOffset, valuesOffset);
@@ -725,15 +886,7 @@ public class SkipListReader {
                             currentBlockOffset = 0;
                             currentBlockIdx = 0;
                         } else {
-                            long nextBlock = currentBlock + (long) BLOCK_STRIDE;
-                            long currentValue = inputKeys[offsetPos];
-                            for (int i = 0; i < fc; i++) {
-                                long blockMaxValue = page.getLong(currentBlockOffset + DATA_BLOCK_HEADER_SIZE + 8 * i);
-                                nextBlock = currentBlock + (long) BLOCK_STRIDE * skipOffsetForPointer(Math.max(0, i - 1));
-                                if (blockMaxValue >= currentValue) {
-                                    break;
-                                }
-                            }
+                            long nextBlock = findNextBlock(page, fc, inputKeys[offsetPos]);
 
                             currentBlockOffset = 0;
                             currentBlockIdx = 0;
@@ -746,28 +899,32 @@ public class SkipListReader {
         }
 
         private void readOffsetsForBlock_Compressed(int n, long valuesOffset) {
-            int searchStart = currentBlockIdx;
-            int remainingToRead = n - currentBlockIdx;
+            long[] decompressedData = decompressedBlock.data;
 
-            outer:
-            while (offsetPos < inputKeys.length) {
+            while (offsetPos < inputKeys.length && currentBlockIdx < n) {
                 long kv = inputKeys[offsetPos];
 
-                for (; currentBlockIdx < searchStart + remainingToRead; currentBlockIdx++) {
-                    long pv = decompressedData[currentBlockIdx];
-                    if (kv < pv) {
-                        offsetPos++;
-                        valueOffsets[vLen++] = -1;
-                        continue outer;
-                    } else if (kv == pv) {
-                        long val = valuesOffset + 8L * (currentBlockIdx - searchStart) * (RECORD_SIZE - 1);
-                        valueOffsets[vLen++] = val;
-                        offsetPos++;
+                if (decompressedData[currentBlockIdx] < kv) {
+                    int lo = currentBlockIdx;
+                    int step = 1;
+                    while (lo + step < n && decompressedData[lo + step] < kv) {
+                        lo += step;
+                        step <<= 1;
+                    }
 
-                        continue outer;
+                    currentBlockIdx = binarySearchUB(decompressedData, kv, lo, Math.min(n, lo + step));
+                    if (currentBlockIdx >= n) {
+                        break;
                     }
                 }
-                break;
+
+                if (decompressedData[currentBlockIdx] == kv) {
+                    valueOffsets[vLen++] = valuesOffset + 8L * currentBlockIdx * (RECORD_SIZE - 1);
+                }
+                else {
+                    valueOffsets[vLen++] = -1;
+                }
+                offsetPos++;
             }
         }
 
@@ -787,7 +944,7 @@ public class SkipListReader {
                         valueOffsets[vLen++] = -1;
                         continue outer;
                     } else if (kv == pv) {
-                        long val = valuesOffset + 8L * (currentBlockIdx - searchStart) * (RECORD_SIZE - 1);
+                        long val = valuesOffset + 8L * currentBlockIdx * (RECORD_SIZE - 1);
                         valueOffsets[vLen++] = val;
                         offsetPos++;
 
@@ -800,8 +957,12 @@ public class SkipListReader {
 
     }
 
-    public ValueReader getValueReader(long[] keys) {
-        return new ValueReader(keys);
+    public ValueReader getValueReader(SegmentAllocator segmentAllocator, long[] keys) {
+        return new ValueReader(segmentAllocator, keys, null);
+    }
+
+    public ValueReader getValueReader(SegmentAllocator segmentAllocator, long[] keys, @Nullable ValueBatchContext batchContext) {
+        return new ValueReader(segmentAllocator, keys, batchContext);
     }
 
     public ValueReader getEmptyValueReader() {
@@ -816,7 +977,7 @@ public class SkipListReader {
      * the result array will look like [ 1, 2, 3, 4, ..., 1, 2, 3, 4, ... ]
      * */
     public long[] getAllValues(long[] keys) throws IOException {
-        var reader = getValueReader(keys);
+        var reader = getValueReader(Arena.ofAuto(), keys);
         long[] vals = new long[keys.length * (RECORD_SIZE-1)];
 
         while (reader.advance()) {
@@ -857,11 +1018,7 @@ public class SkipListReader {
                 int searchStart = currentBlockIdx;
 
                 if (FLAG_COMPRESSED_BLOCK == (flags & FLAG_COMPRESSED_BLOCK)) {
-                    if (lastDecompressedBlock != currentBlock) {
-                        SegmentCompressorBuffer buffer = new SegmentCompressorBuffer(page.getMemorySegment(), dataOffset);
-                        DocIdCompressor.decompress(buffer, n, decompressedData);
-                        lastDecompressedBlock = currentBlock;
-                    }
+                    long[] decompressedData = decompressBlock(page, dataOffset, n);
                     outer:
                     while (pos < keys.length) {
                         long kv = keys[pos];
@@ -912,15 +1069,8 @@ public class SkipListReader {
                         currentBlockIdx = 0;
                     }
                     else {
-                        long nextBlock = currentBlock + (long) BLOCK_STRIDE;
-                        long currentValue = keys[pos];
-                        for (int i = 0; i < fc; i++) {
-                            long blockMaxValue = page.getLong(currentBlockOffset + DATA_BLOCK_HEADER_SIZE + 8 * i);
-                            nextBlock = currentBlock + (long) BLOCK_STRIDE * skipOffsetForPointer(Math.max(0, i-1));
-                            if (blockMaxValue >= currentValue) {
-                                break;
-                            }
-                        }
+                        long nextBlock = findNextBlock(page, fc, keys[pos]);
+
                         currentBlockOffset = 0;
                         currentBlockIdx = 0;
                         currentBlock = nextBlock;
@@ -937,17 +1087,27 @@ public class SkipListReader {
         return page.getLong(pageDataOffset(currentBlockOffset, fc) + 8*(n-1));
     }
 
-    /** Return the next block we need to look in if we are looking for targetValue */
+    private int readAhead() {
+        // Readahead if we've seen sequentail read behavior
+        if (sequentialReadsObserved >= 2)
+            return BLOCK_READ_AHEAD_MAX;
+        return Math.min(1, BLOCK_READ_AHEAD_MIN);
+    }
+
     private long findNextBlock(MemoryPage page, int fc, long targetValue) {
-        long nextBlock = currentBlock + (long) BLOCK_STRIDE;
+        // The pointer distances are not strictly increasing in the V0 format due to a construction bug.
+        // TODO: After 2027-01-01 we can drop support for this historical quirk and simplify the function
+        int furthestBelow = 0;
+
         for (int i = 0; i < fc; i++) {
             long blockMaxValue = page.getLong(currentBlockOffset + DATA_BLOCK_HEADER_SIZE + 8 * i);
-            nextBlock = currentBlock + (long) BLOCK_STRIDE * skipOffsetForPointer(Math.max(0, i-1));
             if (blockMaxValue >= targetValue) {
-                break;
+                return currentBlock + (long) BLOCK_STRIDE * (furthestBelow + 1);
             }
+            furthestBelow = Math.max(furthestBelow, format.skipOffsetForPointer(i));
         }
-        return nextBlock;
+
+        return currentBlock + (long) BLOCK_STRIDE * Math.max(1, furthestBelow);
     }
 
 

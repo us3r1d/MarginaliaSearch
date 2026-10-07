@@ -16,31 +16,24 @@ dependencies {
     implementation project(':code:common:db')
     implementation project(':code:common:config')
 
-    implementation dependencies.create(libs.spark.get()) {
-        exclude group: 'org.eclipse.jetty'
-    }
-    implementation libs.bundles.jetty
     implementation libs.guava
     implementation dependencies.create(libs.guice.get()) {
         exclude group: 'com.google.guava'
     }
 
     implementation libs.bundles.curator
-    implementation libs.guava
     libs.bundles.grpc.get().each {
         implementation dependencies.create(it) {
             exclude group: 'com.google.guava'
         }
     }
 
-    implementation libs.guava
 
     implementation libs.bundles.prometheus
     implementation libs.bundles.slf4j
     implementation libs.bucket4j
     implementation libs.notnull
     implementation libs.gson
-    implementation libs.bundles.curator
     implementation libs.bundles.flyway
 
     libs.bundles.jooby.get().each {
@@ -52,16 +45,14 @@ dependencies {
     testImplementation libs.bundles.slf4j.test
     implementation libs.bundles.mariadb
 
-    testImplementation platform('org.testcontainers:testcontainers-bom:1.21.4') {
+    testImplementation platform(libs.testcontainers.bom.get()) {
         exclude group: 'org.apache.commons'
     }
     testImplementation libs.commons.compress
     testImplementation libs.commons.codec
-    testImplementation 'org.testcontainers:mariadb:1.21.4'
-    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
+    testImplementation libs.bundles.testcontainers
     testImplementation project(':code:libraries:test-helpers')
 
-    testImplementation libs.bundles.slf4j.test
     testImplementation libs.bundles.junit
     testImplementation libs.mockito
 

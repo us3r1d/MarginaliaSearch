@@ -9,13 +9,14 @@ import nu.marginalia.domsample.DomSampleGrpcService;
 import nu.marginalia.execution.*;
 import nu.marginalia.functions.favicon.FaviconGrpcService;
 import nu.marginalia.index.api.IndexMqEndpoints;
+import nu.marginalia.index.searchset.SearchSetsService;
+import nu.marginalia.index.searchset.ConnectivitySets;
 import nu.marginalia.linkdb.docs.DocumentDbReader;
 import nu.marginalia.linkgraph.DomainLinks;
 import nu.marginalia.linkgraph.PartitionLinkGraphService;
 import nu.marginalia.livecapture.LiveCaptureGrpcService;
 import nu.marginalia.rss.svc.FeedsGrpcService;
 import nu.marginalia.service.control.ServiceEventLog;
-import nu.marginalia.service.discovery.property.ServicePartition;
 import nu.marginalia.service.server.BaseServiceParams;
 import nu.marginalia.service.server.Initialization;
 import nu.marginalia.service.server.JoobyService;
@@ -26,12 +27,12 @@ import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
-import static nu.marginalia.linkdb.LinkdbFileNames.DOCDB_FILE_NAME;
-import static nu.marginalia.linkdb.LinkdbFileNames.DOMAIN_LINKS_FILE_NAME;
+import static nu.marginalia.linkdb.LinkdbFileNames.*;
 
 public class IndexService extends JoobyService {
     private final Logger logger = LoggerFactory.getLogger(getClass());
@@ -40,6 +41,8 @@ public class IndexService extends JoobyService {
     private final Initialization init;
     private final IndexOpsService opsService;
     private final StatefulIndex statefulIndex;
+    private final SearchSetsService searchSetsService;
+    private final ConnectivitySets connectivitySets;
     private final FileStorageService fileStorageService;
     private final DocumentDbReader documentDbReader;
 
@@ -53,7 +56,10 @@ public class IndexService extends JoobyService {
     public IndexService(BaseServiceParams params,
                         IndexOpsService opsService,
                         IndexGrpcService indexQueryService,
+                        IndexUrlApiGrpcService urlApiService,
                         StatefulIndex statefulIndex,
+                        SearchSetsService searchSetsService,
+                        ConnectivitySets connectivitySets,
                         FileStorageService fileStorageService,
                         DocumentDbReader documentDbReader,
                         DomainLinks domainLinks,
@@ -73,6 +79,7 @@ public class IndexService extends JoobyService {
     {
         super(params,
                 List.of(indexQueryService,
+                        urlApiService,
                         partitionLinkGraphService,
                         liveCaptureGrpcService,
                         domSampleGrpcService,
@@ -87,6 +94,8 @@ public class IndexService extends JoobyService {
 
         this.opsService = opsService;
         this.statefulIndex = statefulIndex;
+        this.searchSetsService = searchSetsService;
+        this.connectivitySets = connectivitySets;
         this.fileStorageService = fileStorageService;
         this.documentDbReader = documentDbReader;
         this.domainLinks = domainLinks;
@@ -119,19 +128,10 @@ public class IndexService extends JoobyService {
         executionInit.initDefaultActors();
     }
 
-    @MqRequest(endpoint = IndexMqEndpoints.INDEX_RERANK)
-    public String rerank(String message) {
-        if (!opsService.rerank()) {
-            throw new IllegalStateException("Ops lock busy");
-        }
-        return "ok";
-    }
-
-    @MqRequest(endpoint = IndexMqEndpoints.INDEX_REPARTITION)
-    public String repartition(String message) {
-        if (!opsService.repartition()) {
-            throw new IllegalStateException("Ops lock busy");
-        }
+    @MqRequest(endpoint = IndexMqEndpoints.INDEX_RELOAD_SEARCH_SETS)
+    public String reloadSearchSets(String message) throws IOException {
+        searchSetsService.reload();
+        connectivitySets.reload();
         return "ok";
     }
 

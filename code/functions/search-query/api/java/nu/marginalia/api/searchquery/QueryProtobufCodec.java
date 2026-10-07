@@ -17,6 +17,15 @@ import java.util.Map;
 
 public class QueryProtobufCodec {
 
+    public static UnrankedQueryResponse convertQueryResponse(RpcQsUnrankedResponse rsp) {
+        var results = new ArrayList<DecoratedSearchResultItem>(rsp.getResultsCount());
+
+        for (int i = 0; i < rsp.getResultsCount(); i++) {
+            results.add(convertDecoratedResult(rsp.getResults(i)));
+        }
+
+        return new UnrankedQueryResponse(results, rsp.getEncodedCursor());
+    }
 
     public static QueryResponse convertQueryResponse(RpcQsResponse rsp) {
         var results = new ArrayList<DecoratedSearchResultItem>(rsp.getResultsCount());
@@ -53,6 +62,7 @@ public class QueryProtobufCodec {
                     results.getFormat(),
                     results.getFeatures(),
                     results.getPubYear(),
+                    results.getPubDate(),
                     results.getDataHash(),
                     results.getWordsTotal(),
                     results.getBestPositions(),
@@ -180,6 +190,7 @@ public class QueryProtobufCodec {
 
         return new SearchResultItem(
                 rawItem.getCombinedId(),
+                rawItem.getNode(),
                 rawItem.getEncodedDocMetadata(),
                 rawItem.getHtmlFeatures(),
                 keywordScores,
@@ -210,6 +221,7 @@ public class QueryProtobufCodec {
                     rpcDecoratedResultItem.getFormat(),
                     rpcDecoratedResultItem.getFeatures(),
                     rpcDecoratedResultItem.getPubYear(),
+                    rpcDecoratedResultItem.getPubDate(),
                     rpcDecoratedResultItem.getDataHash(),
                     rpcDecoratedResultItem.getWordsTotal(),
                     rpcDecoratedResultItem.getBestPositions(),

@@ -8,6 +8,7 @@ import io.jooby.Jooby;
 import io.jooby.StatusCode;
 import io.jooby.test.MockContext;
 import io.jooby.test.MockRouter;
+import nu.marginalia.api.feeds.FeedsClient;
 import nu.marginalia.api.polar.PolarBenefit;
 import nu.marginalia.api.polar.PolarBenefits;
 import nu.marginalia.api.polar.PolarClient;
@@ -20,7 +21,7 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.mockito.Mockito;
-import org.testcontainers.containers.MariaDBContainer;
+import org.testcontainers.mariadb.MariaDBContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
@@ -35,7 +36,7 @@ import java.util.concurrent.TimeoutException;
 @Tag("slow")
 public class ApiV2Test {
     @Container
-    static MariaDBContainer<?> mariaDBContainer = new MariaDBContainer<>("mariadb")
+    static MariaDBContainer mariaDBContainer = new MariaDBContainer("mariadb")
             .withDatabaseName("WMSA_prod")
             .withUsername("wmsa")
             .withPassword("wmsa")
@@ -73,6 +74,7 @@ public class ApiV2Test {
             protected void configure() {
                 bind(HikariDataSource.class).toInstance(dataSource);
                 bind(GrpcChannelPoolFactoryIf.class).toInstance(testGrpcChannelPoolFactory);
+                bind(FeedsClient.class).toInstance(Mockito.mock(FeedsClient.class));
                 bind(PolarClient.class).toInstance(PolarClient.asDisabled());
                 bind(PolarBenefits.class).toInstance(PolarBenefits.asDisabled());
             }

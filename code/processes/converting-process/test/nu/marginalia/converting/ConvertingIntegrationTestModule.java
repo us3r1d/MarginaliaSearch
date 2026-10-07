@@ -7,6 +7,7 @@ import nu.marginalia.WmsaHome;
 import nu.marginalia.api.domsample.DomSampleClient;
 import nu.marginalia.converting.processor.ConverterDomainTypes;
 import nu.marginalia.process.ProcessConfiguration;
+import nu.marginalia.process.control.ProcessEventLog;
 import nu.marginalia.service.module.ServiceConfiguration;
 import org.mockito.Mockito;
 
@@ -15,7 +16,6 @@ public class ConvertingIntegrationTestModule  extends AbstractModule {
         bind(Double.class).annotatedWith(Names.named("min-document-quality")).toInstance(-15.);
         bind(Integer.class).annotatedWith(Names.named("min-document-length")).toInstance(250);
         bind(Integer.class).annotatedWith(Names.named("max-title-length")).toInstance(128);
-        bind(Integer.class).annotatedWith(Names.named("max-summary-length")).toInstance(255);
         bind(ServiceConfiguration.class).toInstance(new ServiceConfiguration(
                 null, 1, "localhost", "localhost", 0, null
         ));
@@ -24,6 +24,7 @@ public class ConvertingIntegrationTestModule  extends AbstractModule {
         ));
         bind(LanguageModels.class).toInstance(WmsaHome.getLanguageModels());
         bind(ConverterDomainTypes.class).toInstance(Mockito.mock(ConverterDomainTypes.class));
+        bind(ProcessEventLog.class).toInstance(Mockito.mock(ProcessEventLog.class));
 
         DomSampleClient domSampleClientMock = Mockito.mock(DomSampleClient.class);
         bind(DomSampleClient.class).toInstance(domSampleClientMock);

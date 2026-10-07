@@ -1,7 +1,7 @@
 plugins {
     id 'java'
     id 'jvm-test-suite'
-    id "com.google.protobuf" version "0.9.4"
+    id "com.google.protobuf" version "0.10.0"
 }
 
 jar.archiveBaseName = 'execution-api'
@@ -43,7 +43,6 @@ dependencies {
         exclude group: 'com.google.guava'
     }
     implementation libs.bundles.protobuf
-    implementation libs.guava
     libs.bundles.grpc.get().each {
         implementation dependencies.create(it) {
             exclude group: 'com.google.guava'

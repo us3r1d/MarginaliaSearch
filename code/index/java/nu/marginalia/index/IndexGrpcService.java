@@ -3,20 +3,19 @@ package nu.marginalia.index;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import io.prometheus.metrics.core.metrics.Counter;
 import io.prometheus.metrics.core.metrics.Histogram;
-import nu.marginalia.api.searchquery.IndexApiGrpc;
-import nu.marginalia.api.searchquery.RpcDecoratedResultItem;
-import nu.marginalia.api.searchquery.RpcIndexQuery;
-import nu.marginalia.api.searchquery.RpcIndexQueryResponse;
+import nu.marginalia.api.searchquery.*;
 import nu.marginalia.index.model.SearchContext;
+import nu.marginalia.index.model.UnrankedSearchContext;
 import nu.marginalia.index.results.IndexResultRankingService;
-import nu.marginalia.index.searchset.SearchSet;
+import nu.marginalia.ranking.set.SearchSet;
 import nu.marginalia.index.searchset.SearchSetsService;
-import nu.marginalia.index.searchset.SmallSearchSet;
-import nu.marginalia.index.searchset.connectivity.ConnectivitySets;
-import nu.marginalia.index.searchset.connectivity.ConnectivityView;
+import nu.marginalia.ranking.set.SmallSearchSet;
+import nu.marginalia.index.searchset.ConnectivitySets;
+import nu.marginalia.ranking.connectivity.ConnectivityView;
 import nu.marginalia.language.config.LanguageConfiguration;
 import nu.marginalia.language.keywords.KeywordHasher;
 import nu.marginalia.language.model.LanguageDefinition;
@@ -31,8 +30,6 @@ import org.slf4j.MarkerFactory;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.LockSupport;
 
 @Singleton
 public class IndexGrpcService
@@ -98,7 +95,7 @@ public class IndexGrpcService
 
         try {
             long endTime = System.currentTimeMillis() + request.getQueryLimits().getTimeoutMs();
-            KeywordHasher hasher = findHasher(request);
+            KeywordHasher hasher = findHasher(request.getLangIsoCode());
 
             List<RpcDecoratedResultItem> results = wmsa_query_time
                     .labelValues(nodeName, "GRPC")
@@ -114,7 +111,7 @@ public class IndexGrpcService
 
                             if (!set.imposesConstraint()
                                 && "en".equalsIgnoreCase(request.getLangIsoCode())
-                                && !hasSiteTerm(request)
+                                && !hasSiteTerm(request.getTerms())
                             ) {
                                 connectivityView = connectivitySets.getView();
                             }
@@ -124,14 +121,16 @@ public class IndexGrpcService
 
                             CombinedIndexReader index = indexReference.get();
 
-                            SearchContext rankingContext = SearchContext.create(index, hasher, request, set, connectivityView);
+                            SearchContext rankingContext = SearchContext.create(index,nodeId, hasher, request, set, connectivityView);
                             IndexQueryExecution queryExecution = new IndexQueryExecution(index, documentDbReader, rankingService, rankingContext, nodeId);
                             return queryExecution.run();
 
                         }
                         catch (IndexQueryExecution.TooManySimultaneousQueriesException ex) {
-                            logger.error("Rejected request execution due to overload");
-                            return List.of();
+                            logger.warn("Rejected request execution due to overload");
+                            throw Status.RESOURCE_EXHAUSTED
+                                    .withDescription("Too many simultaneous queries in index partition")
+                                    .asRuntimeException();
                         }
                         catch (Exception ex) {
                             logger.error("Error in handling request", ex);
@@ -151,14 +150,75 @@ public class IndexGrpcService
 
             responseObserver.onCompleted();
         }
+        catch (StatusRuntimeException ex) {
+            responseObserver.onError(ex);
+        }
         catch (Exception ex) {
             logger.error("Error in handling request", ex);
             responseObserver.onError(Status.INTERNAL.withCause(ex).asRuntimeException());
         }
     }
 
-    private boolean hasSiteTerm(RpcIndexQuery request) {
-        for (var term : request.getTerms().getTermsRequireList()) {
+    @Override
+    public void unrankedQuery(RpcIndexUnrankedQuery request, StreamObserver<RpcIndexQueryResponse> responseObserver) {
+
+        try {
+            KeywordHasher hasher = findHasher(request.getLangIsoCode());
+
+            List<RpcDecoratedResultItem> results = null;
+            boolean isFinished;
+            long lastId;
+
+            // Perform the search
+            try (StatefulIndex.IndexReference indexReference = statefulIndex.get()) {
+                if (!indexReference.isAvailable()) {
+                    responseObserver.onNext(RpcIndexQueryResponse.newBuilder()
+                            .setFinished(true)
+                            .build());
+
+                    responseObserver.onCompleted();
+                    return;
+                }
+
+                CombinedIndexReader index = indexReference.get();
+
+                UnrankedSearchContext rankingContext = UnrankedSearchContext.create(index, hasher, request);
+
+                if (rankingContext.termIdsRequireUnique.size() == 0)
+                    throw Status.INVALID_ARGUMENT.withDescription("Received invalid request with no term ids")
+                            .asRuntimeException();
+
+                if (rankingContext.limitTotal > 1_000_000)
+                    throw Status.INVALID_ARGUMENT.withDescription("Received invalid request with dangerous limitTotal")
+                            .asRuntimeException();
+
+                IndexUnrankedQueryExecution queryExecution =
+                        new IndexUnrankedQueryExecution(index, documentDbReader, rankingService, rankingContext, nodeId);
+                results = queryExecution.run();
+
+                lastId = queryExecution.getLastId();
+                isFinished = queryExecution.isFinished();
+            }
+
+            responseObserver.onNext(RpcIndexQueryResponse.newBuilder()
+                    .addAllResults(results)
+                    .setLastResultId(lastId)
+                    .setFinished(isFinished)
+                    .build());
+
+            responseObserver.onCompleted();
+        }
+        catch (StatusRuntimeException ex) {
+            responseObserver.onError(ex);
+        }
+        catch (Exception ex) {
+            logger.error("Error in handling request", ex);
+            responseObserver.onError(Status.INTERNAL.withCause(ex).asRuntimeException());
+        }
+    }
+
+    private boolean hasSiteTerm(RpcQueryTerms terms) {
+        for (var term : terms.getTermsRequireList()) {
             if (term.startsWith("site:"))
                 return true;
         }
@@ -168,8 +228,8 @@ public class IndexGrpcService
     /** Keywords are translated to a numeric format via a 64 bit hash algorithm,
      * which varies depends on the language.
      */
-    private KeywordHasher findHasher(RpcIndexQuery request) {
-        KeywordHasher hasher = keywordHasherByLangIso.get(request.getLangIsoCode());
+    private KeywordHasher findHasher(String isoLangCode) {
+        KeywordHasher hasher = keywordHasherByLangIso.get(isoLangCode);
         if (hasher != null)
             return hasher;
 
@@ -180,7 +240,6 @@ public class IndexGrpcService
         throw new IllegalStateException("Could not find fallback keyword hasher for iso code 'en'");
     }
 
-
     // exists for test access
     public List<RpcDecoratedResultItem> justQuery(RpcIndexQuery request) {
         try (var indexReference = statefulIndex.get()) {
@@ -189,7 +248,7 @@ public class IndexGrpcService
 
             CombinedIndexReader currentIndex = indexReference.get();
 
-            SearchContext context = SearchContext.create(currentIndex,
+            SearchContext context = SearchContext.create(currentIndex, nodeId,
                     keywordHasherByLangIso.get("en"), request, getSearchSet(request),
                     ConnectivityView.empty()
                     );
@@ -211,7 +270,6 @@ public class IndexGrpcService
         String identifier = request.getSearchSetIdentifier();
         return searchSetsService.getSearchSetByName(identifier);
     }
-
 
 }
 

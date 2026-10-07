@@ -2,13 +2,11 @@ package nu.marginalia.search;
 
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
-import it.unimi.dsi.fastutil.ints.IntList;
+import io.jooby.Context;
+import nu.marginalia.WebsiteUrl;
 import nu.marginalia.api.math.MathClient;
 import nu.marginalia.api.searchquery.QueryClient;
-import nu.marginalia.api.searchquery.QueryFilterSpec;
 import nu.marginalia.api.searchquery.RpcQueryLimits;
-import nu.marginalia.api.searchquery.RpcTemporalBias;
-import nu.marginalia.api.searchquery.model.query.NsfwFilterTier;
 import nu.marginalia.api.searchquery.model.query.QueryResponse;
 import nu.marginalia.api.searchquery.model.results.DecoratedSearchResultItem;
 import nu.marginalia.bbpc.BrailleBlockPunchCards;
@@ -19,6 +17,7 @@ import nu.marginalia.model.crawl.DomainIndexingState;
 import nu.marginalia.search.model.*;
 import nu.marginalia.search.results.UrlDeduplicator;
 import nu.marginalia.search.svc.SearchQueryCountService;
+import nu.marginalia.search.svc.SearchResultRedirectService;
 import nu.marginalia.search.svc.SearchUnitConversionService;
 import org.apache.logging.log4j.util.Strings;
 import org.slf4j.Logger;
@@ -51,12 +50,7 @@ public class SearchOperator {
     private final QueryClient queryClient;
     private final SearchUnitConversionService searchUnitConversionService;
     private final SearchQueryCountService searchVisitorCount;
-
-    static final RpcQueryLimits shallowLimit = RpcQueryLimits.newBuilder()
-            .setResultsTotal(100)
-            .setResultsByDomain(100)
-            .setTimeoutMs(100)
-            .build();
+    private final WebsiteUrl websiteUrl;
 
     static final RpcQueryLimits defaultLimits = RpcQueryLimits.newBuilder()
             .setResultsTotal(100)
@@ -69,7 +63,8 @@ public class SearchOperator {
                           DbDomainQueries domainQueries,
                           QueryClient queryClient,
                           SearchUnitConversionService searchUnitConversionService,
-                          SearchQueryCountService searchVisitorCount
+                          SearchQueryCountService searchVisitorCount,
+                          WebsiteUrl websiteUrl
                           )
     {
 
@@ -78,56 +73,78 @@ public class SearchOperator {
         this.queryClient = queryClient;
         this.searchUnitConversionService = searchUnitConversionService;
         this.searchVisitorCount = searchVisitorCount;
+        this.websiteUrl = websiteUrl;
     }
 
-    public SimpleSearchResults doSiteSearch(String domain,
-                                        int domainId,
-                                        int count,
-                                        int page) throws TimeoutException {
-        var queryResponse = queryClient.search(
-                QueryFilterSpec.FilterAdHoc.builder().domainsInclude(IntList.of(domainId)).build(),
-                "site:"+domain,
+    public UnrankedSearchResults doSiteSearch(
+            Context ctx,
+            String domain, int count, String cursor) throws TimeoutException {
+
+        var rs =  queryClient.unrankedSearch(
+                List.of("site:"+domain),
                 "en",
-                NsfwFilterTier.DANGER,
                 RpcQueryLimits.newBuilder()
                         .setResultsTotal(count)
-                        .setResultsByDomain(count)
                         .setTimeoutMs(100)
                         .build(),
-                page
+                cursor
         );
 
-        return getResultsFromQuery(queryResponse);
+        var asc = SearchResultRedirectService.createContext(ctx);
+
+        List<UrlDetails> details = rs.results().stream()
+                .map(item -> createDetails(item, asc))
+                .toList();
+
+        return new UnrankedSearchResults(details, rs.encodedCursor());
     }
 
-    public SimpleSearchResults doBacklinkSearch(String domain, int page) throws TimeoutException {
+    public UnrankedSearchResults doBacklinkSearch(
+            Context ctx,
+            String domain, String cursor) throws TimeoutException {
 
-        var queryResponse = queryClient.search(
-                new QueryFilterSpec.NoFilter(),
-                "links:"+domain,
+        var rs =  queryClient.unrankedSearch(
+                List.of("links:"+domain),
                 "en",
-                NsfwFilterTier.DANGER,
-                shallowLimit,
-                page
+                RpcQueryLimits.newBuilder()
+                        .setResultsTotal(10)
+                        .setTimeoutMs(100)
+                        .build(),
+                cursor
         );
 
-        return getResultsFromQuery(queryResponse);
+        var asc = SearchResultRedirectService.createContext(ctx);
+
+        List<UrlDetails> details = rs.results().stream()
+                .map(item -> createDetails(item, asc))
+                .toList();
+
+        return new UnrankedSearchResults(details, rs.encodedCursor());
     }
 
-    public SimpleSearchResults doLinkSearch(String source, String dest) throws TimeoutException {
-        var queryResponse = queryClient.search(
-                new QueryFilterSpec.NoFilter(),
-                "site:" + source + " links:" + dest,
+    public UnrankedSearchResults doLinkSearch(Context ctx,
+                                              String source, String dest, String cursor) throws TimeoutException {
+
+        var rs =  queryClient.unrankedSearch(
+                List.of("site:"+source, "links:"+dest),
                 "en",
-                NsfwFilterTier.DANGER,
-                shallowLimit,
-                1
+                RpcQueryLimits.newBuilder()
+                        .setResultsTotal(100)
+                        .setTimeoutMs(100)
+                        .build(),
+                cursor
         );
 
-        return getResultsFromQuery(queryResponse);
+        var asc = SearchResultRedirectService.createContext(ctx);
+
+        List<UrlDetails> details = rs.results().stream()
+                .map(item -> createDetails(item, asc))
+                .toList();
+
+        return new UnrankedSearchResults(details, rs.encodedCursor());
     }
 
-    public DecoratedSearchResults doSearch(SearchParameters userParams) throws InterruptedException, TimeoutException {
+    public DecoratedSearchResults doSearch(Context ctx, SearchParameters userParams) throws InterruptedException, TimeoutException {
         // The full user-facing search query does additional work to try to evaluate the query
         // e.g. as a unit conversion query. This is done in parallel with the regular search.
 
@@ -144,7 +161,7 @@ public class SearchOperator {
                 userParams.page()
                 );
 
-        var queryResults = getResultsFromQuery(queryResponse).results;
+        var queryResults = getResultsFromQuery(ctx, queryResponse).results;
 
         // Cluster the results based on the query response
         List<ClusteredUrlDetails> clusteredResults = SearchResultClusterer
@@ -188,19 +205,21 @@ public class SearchOperator {
                 .build();
     }
 
-    public SimpleSearchResults getResultsFromQuery(QueryResponse queryResponse) {
+    public SimpleSearchResults getResultsFromQuery(Context ctx, QueryResponse queryResponse) {
         final RpcQueryLimits limits = queryResponse.limits();
         final UrlDeduplicator deduplicator = new UrlDeduplicator(limits.getResultsByDomain());
 
         // Update the query count (this is what you see on the front page)
         searchVisitorCount.registerQuery();
 
+        var asc = SearchResultRedirectService.createContext(ctx);
+
         List<UrlDetails> details = queryResponse.results().stream()
                 .sorted(this::retentionSortOrder) // Sort in an order that makes us more likely to discard the "bad" duplicates
                 .filter(deduplicator::shouldRetain)
                 .sorted() // Return to the presentation sort order before limiting so we don't throw out good results over schema and "ip-ness"
                 .limit(limits.getResultsTotal())
-                .map(SearchOperator::createDetails)
+                .map(item -> createDetails(item, asc))
                 .toList();
 
         List<ResultsPage> pages = IntStream.rangeClosed(1, queryResponse.totalPages())
@@ -237,11 +256,27 @@ public class SearchOperator {
         return Double.compare(a.rankingScore, b.rankingScore);
     }
 
-    private static UrlDetails createDetails(DecoratedSearchResultItem item) {
+    private UrlDetails createDetails(DecoratedSearchResultItem item, SearchResultRedirectService.AntiscrapeRedirContext asc) {
+
+        String redirectUrl;
+        if (SearchResultRedirectService.isEnabled() && asc != null) {
+            try {
+                redirectUrl = websiteUrl.withPath(SearchResultRedirectService.createRedirectUrl(asc, item.rawIndexResult.nodeId, item.rawIndexResult.getDocumentId()));
+            }
+            catch (Exception ex) {
+                logger.error("Error encoding redirect URL", ex);
+                redirectUrl = null;
+            }
+        }
+        else {
+            redirectUrl = null;
+        }
+
         return new UrlDetails(
                 item.documentId(),
                 item.domainId(),
                 cleanUrl(item.url),
+                redirectUrl,
                 item.title,
                 item.description,
                 item.format,
@@ -249,6 +284,7 @@ public class SearchOperator {
                 DomainIndexingState.ACTIVE,
                 item.rankingScore, // termScore
                 item.resultsFromDomain,
+                item.pubDate,
                 BrailleBlockPunchCards.printBits(item.bestPositions, 64),
                 item.bestPositions,
                 Long.bitCount(item.bestPositions),

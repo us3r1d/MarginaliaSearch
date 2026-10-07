@@ -1,9 +1,10 @@
 package nu.marginalia.array.pool;
 
+import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.LinkedHashMap;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.StampedLock;
@@ -14,10 +15,13 @@ public class PoolLru {
     private static final Logger logger = LoggerFactory.getLogger(PoolLru.class);
 
     private final int maxSize;
-    private final LinkedHashMap<Long, MemoryPage> backingMap;
+    private final Long2ObjectLinkedOpenHashMap<MemoryPage> backingMap;
     private final MemoryPage[] pages;
 
     private final int[] freeQueue;
+
+    // Tracks whether a page is in the free queue so it doesn't enqueued multiple times
+    private final AtomicIntegerArray queueState;
     private final AtomicLong reclaimCycles;
     private final AtomicLong clockWriteIdx;
     private final AtomicLong clockReadIdx;
@@ -28,7 +32,7 @@ public class PoolLru {
     private volatile boolean running = true;
 
     public PoolLru(MemoryPage[] pages) {
-        backingMap = new LinkedHashMap<>(pages.length, 0.75f);
+        backingMap = new Long2ObjectLinkedOpenHashMap<>(pages.length, 0.75f);
         this.pages = pages;
         // Pre-assign all entries with nonsense memory locations
         for (int i = 0; i < pages.length; i++) {
@@ -37,9 +41,11 @@ public class PoolLru {
         maxSize = backingMap.size();
 
         freeQueue = new int[pages.length];
+        queueState = new AtomicIntegerArray(pages.length);
 
         for (int i = 0; i < freeQueue.length; i++) {
             freeQueue[i] = i;
+            queueState.set(i, 1);
         }
 
         clockReadIdx = new AtomicLong();
@@ -87,7 +93,7 @@ public class PoolLru {
             buffer.touchClock(1);
             // Evict the last entry if we've exceeded the
             while (backingMap.size() >= maxSize) {
-                backingMap.pollFirstEntry();
+                backingMap.remove(backingMap.firstLongKey());
             }
         }
         finally {
@@ -98,7 +104,10 @@ public class PoolLru {
     public void deregister(MemoryPage buffer) {
         long stamp = lock.writeLock();
         try {
-            backingMap.remove(buffer.pageAddress(), buffer);
+            long address = buffer.pageAddress();
+            if (backingMap.get(address) == buffer) {
+                backingMap.remove(address);
+            }
         }
         finally {
             lock.unlockWrite(stamp);
@@ -114,9 +123,10 @@ public class PoolLru {
             var readIdx = clockReadIdx.get();
             var writeIdx = clockWriteIdx.get();
 
-            if (writeIdx - readIdx == freeQueue.length / 4) {
+            if (writeIdx - readIdx <= freeQueue.length / 4) {
                 LockSupport.unpark(reclaimThread);
-            } else if (readIdx == writeIdx) {
+            }
+            if (readIdx == writeIdx) {
                 if ((iter % 10000) == 0) {
                     if (!running) {
                         // This shouldn't be possible, but just in case we encounter this state,
@@ -131,7 +141,9 @@ public class PoolLru {
             }
 
             if (clockReadIdx.compareAndSet(readIdx, readIdx + 1)) {
-                return pages[freeQueue[(int) (readIdx % freeQueue.length)]];
+                int pageIdx = freeQueue[(int) (readIdx % freeQueue.length)];
+                queueState.set(pageIdx, 0);
+                return pages[pageIdx];
             }
         }
     }
@@ -148,7 +160,9 @@ public class PoolLru {
             int queueSize = (int) (writeIdx - readIdx);
 
             if (queueSize >= targetQueueSize) {
-                LockSupport.parkNanos(10_000);
+                // Consumers unpark us when the queue runs low, so this bounds
+                // wakeup staleness rather than polling for work
+                LockSupport.parkNanos(10_000_000);
                 continue;
             }
 
@@ -158,21 +172,26 @@ public class PoolLru {
 
             reclaimCycles.incrementAndGet();
 
+            int visited = 0;
+
             do {
+                if (++visited > 4 * pages.length) {
+                    break;
+                }
                 if (++pageIdx >= pages.length) {
                     pageIdx = 0;
                 }
                 var currentPage = pages[pageIdx];
 
                 if (currentPage.decreaseClock()) {
-                    if (!currentPage.isHeld()) {
+                    if (currentPage.isHeld()) {
+                        currentPage.touchClock(1);
+                    }
+                    else if (queueState.compareAndSet(pageIdx, 0, 1)) {
                         deregister(pages[pageIdx]);
                         freeQueue[(int) (clockWriteIdx.get() % freeQueue.length)] = pageIdx;
                         clockWriteIdx.incrementAndGet();
                         toClaim--;
-                    }
-                    else {
-                        currentPage.touchClock(1);
                     }
                 }
 

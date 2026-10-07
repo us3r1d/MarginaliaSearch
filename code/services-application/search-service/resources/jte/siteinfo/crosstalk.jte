@@ -73,7 +73,7 @@
                 $unsafe{details.displayDescription()}
             </div>
             <div class="p-2 text-sm border-b dark:border-gray-600 pb-6">
-                <a rel="external noopener nofollow" href="${details.url.toString()}" class="mx-3 text-liteblue dark:text-blue-200 flex space-x-2 place-items-baseline hyphens-auto">
+                <a rel="external noopener nofollow" href="${details.userFacingUrl().toString()}" class="mx-3 text-liteblue dark:text-blue-200 flex space-x-2 place-items-baseline hyphens-auto">
                     <i class="fa fa-link"></i>
                     <span class="grow break-all">$unsafe{details.displayUrl()}</span>
                 </a>
@@ -97,7 +97,7 @@
                 $unsafe{details.displayDescription()}
             </div>
             <div class="p-2 text-sm border-b dark:border-gray-600 pb-6">
-                <a rel="external noopener nofollow" href="${details.url.toString()}" class="mx-3 text-liteblue dark:text-blue-200 flex space-x-2 place-items-baseline hyphens-auto">
+                <a rel="external noopener nofollow" href="${details.userFacingUrl().toString()}" class="mx-3 text-liteblue dark:text-blue-200 flex space-x-2 place-items-baseline hyphens-auto">
                     <i class="fa fa-link"></i>
                     <span class="grow break-all">$unsafe{details.displayUrl()}</span>
                 </a>
@@ -108,6 +108,12 @@
 
 </div>
 
+<!-- Pagination -->
+@if (model.hasNext())
+    <div class="mt-8 mb-8 flex justify-center space-x-2 font-mono text-sm">
+        <a href="${model.nextUrl()}" class="px-2 py-1 bg-white border dark:border-gray-600 border-gray-300 hover:bg-gray-100 dark:bg-gray-800 hover:bg-gray-900">More</a>
+    </div>
+@endif
 
 @template.part.footerLegal()
 

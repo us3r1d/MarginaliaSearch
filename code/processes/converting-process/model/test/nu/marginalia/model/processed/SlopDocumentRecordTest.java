@@ -34,7 +34,7 @@ public class SlopDocumentRecordTest {
     public void test() throws IOException {
         var record = new SlopDocumentRecord("example.com", "https://example.com/foo", 1, "OK", "",
                 "test",
-                "testtest",
+                new byte[] { 1, 2, 3 },
                 1,
                 "HTML3",
                 100,
@@ -43,6 +43,7 @@ public class SlopDocumentRecordTest {
                 0xBEEFL,
                 "en",
                 null,
+                0,
                 List.of("test1", "test2"),
                 new long[] { 2, 3},
                 List.of(VarintCodedSequence.generate(1, 3, 5), VarintCodedSequence.generate(2, 4, 6)),
@@ -65,12 +66,14 @@ public class SlopDocumentRecordTest {
                     record.htmlFeatures(),
                     record.documentMetadata(),
                     record.length(),
+                    record.pubDate(),
                     record.languageIsoCode(),
                     record.words(),
                     record.metas(),
                     record.positions(),
                     record.spanCodes(),
-                    record.spans()
+                    record.spans(),
+                    record.documentTextZstd()
             );
 
             Assertions.assertEquals(expected, readRecord);
@@ -86,7 +89,6 @@ public class SlopDocumentRecordTest {
                     record.url(),
                     record.ordinal(),
                     record.title(),
-                    record.description(),
                     record.htmlFeatures(),
                     record.htmlStandard(),
                     record.languageIsoCode(),

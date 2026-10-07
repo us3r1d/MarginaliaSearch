@@ -2,10 +2,10 @@ package nu.marginalia.functions.searchquery.query_parser;
 
 import ca.rmen.porterstemmer.PorterStemmer;
 import com.google.inject.Inject;
+import nu.marginalia.api.searchquery.model.compiled.CompiledQuery;
 import nu.marginalia.functions.searchquery.query_parser.model.QWord;
 import nu.marginalia.functions.searchquery.query_parser.model.QWordGraph;
 import nu.marginalia.functions.searchquery.query_parser.model.QWordGraphPathLister;
-import nu.marginalia.functions.searchquery.query_parser.model.QWordPathsRenderer;
 import nu.marginalia.language.NounVariants;
 import nu.marginalia.segmentation.NgramLexicon;
 import nu.marginalia.term_frequency_dict.TermFrequencyDict;
@@ -42,7 +42,7 @@ public class QueryExpansion {
             strategy.expand(graph);
         }
 
-        return new Expansion(QWordPathsRenderer.render(graph),
+        return new Expansion(graph.compileToQuery(),
                 createSegments(graph),
                 listFullConstraints(graph));
     }
@@ -51,6 +51,7 @@ public class QueryExpansion {
         if ("en".equalsIgnoreCase(langIsoCode)) {
             return List.of(
                     this::joinDashes,
+                    this::romanNumerals,
                     this::splitWordNum,
                     this::joinTerms,
                     this::nounPluralFormsEN,
@@ -62,6 +63,7 @@ public class QueryExpansion {
         else {
             return List.of(
                     this::joinDashes,
+                    this::romanNumerals,
                     this::splitWordNum,
                     this::joinTerms,
                     this::categoryKeywords,
@@ -81,6 +83,33 @@ public class QueryExpansion {
             if (qw.word().contains("-")) {
                 var joined = StringUtils.join(dashPattern.split(qw.word()));
                 graph.addVariant(qw, joined);
+            }
+        }
+    }
+
+    public void romanNumerals(QWordGraph graph) {
+        for (var qw : graph) {
+            switch (qw.word()) {
+                case "i" -> graph.addVariant(qw, "1");
+                case "ii" -> graph.addVariant(qw, "2");
+                case "iii" -> graph.addVariant(qw, "3");
+                case "iv" -> graph.addVariant(qw, "4");
+                case "v" -> graph.addVariant(qw, "5");
+                case "vi" -> graph.addVariant(qw, "6");
+                case "vii" -> graph.addVariant(qw, "7");
+                case "viii" -> graph.addVariant(qw, "8");
+                case "ix" -> graph.addVariant(qw, "9");
+                case "x" -> graph.addVariant(qw, "10");
+                case "1" -> graph.addVariant(qw, "i");
+                case "2" -> graph.addVariant(qw, "ii");
+                case "3" -> graph.addVariant(qw, "iii");
+                case "4" -> graph.addVariant(qw, "iv");
+                case "5" -> graph.addVariant(qw, "v");
+                case "6" -> graph.addVariant(qw, "vi");
+                case "7" -> graph.addVariant(qw, "vii");
+                case "8" -> graph.addVariant(qw, "viii");
+                case "9" -> graph.addVariant(qw, "ix");
+                case "10" -> graph.addVariant(qw, "x");
             }
         }
     }
@@ -286,7 +315,7 @@ public class QueryExpansion {
         void expand(QWordGraph graph);
     }
 
-    public record Expansion(String compiledQuery,
+    public record Expansion(CompiledQuery<String> compiledQuery,
                             List<List<String>> optionalPharseConstraints,
                             List<List<String>> fullPhraseConstraints) {}
 }

@@ -116,7 +116,7 @@ public class DocumentDbReader {
             // being constructed from an input of longs.
 
             var rs = stmt.executeQuery("""
-                SELECT ID, URL, TITLE, DESCRIPTION, LANGUAGE, WORDS_TOTAL, FORMAT, FEATURES, DATA_HASH, QUALITY, PUB_YEAR
+                SELECT ID, URL, TITLE, LANGUAGE, WORDS_TOTAL, FORMAT, FEATURES, DATA_HASH, QUALITY, PUB_YEAR
                 FROM DOCUMENT WHERE ID IN 
                 """ + docIds);
 
@@ -133,7 +133,6 @@ public class DocumentDbReader {
                         id,
                         urlMaybe.get(),
                         rs.getString("TITLE"),
-                        rs.getString("DESCRIPTION"),
                         rs.getString("LANGUAGE"),
                         rs.getDouble("QUALITY"),
                         rs.getString("FORMAT"),
@@ -148,5 +147,24 @@ public class DocumentDbReader {
         }
 
         return ret;
+    }
+
+    public String getUrl(long docId) throws SQLException {
+
+        if (connection == null || connection.isClosed()) {
+            throw new IllegalStateException("URL query temporarily unavailable due to database switch");
+        }
+
+        try (var stmt = connection.createStatement()) {
+            var rs = stmt.executeQuery("""
+                SELECT URL FROM DOCUMENT WHERE ID = 
+                """ + docId /* safe, long type */);
+            if (rs.next()) {
+                return rs.getString("URL");
+            }
+            else {
+                return null;
+            }
+        }
     }
 }

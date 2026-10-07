@@ -7,10 +7,12 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.InstantSource;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 
 @Singleton
 public class ScrapeStopper {
@@ -28,7 +30,7 @@ public class ScrapeStopper {
 
                     tokens.values().removeIf(Token::isExpired);
                     tokensByIpZone.values().removeIf(Token::isExpired);
-                    validationRatePerZone.values().forEach(ValidationRate::updateTarget);
+                    validationRatePerZone.values().forEach(ValidationRate::updateDelay);
                 }
             }
             catch (InterruptedException ex) {
@@ -99,7 +101,7 @@ public class ScrapeStopper {
         if (null == (token = tokens.remove(sst)))
             return Optional.empty();
 
-        tokensByIpZone.remove(token.remoteIp);
+        tokensByIpZone.remove(token.remoteIp + "-" + zone, token);
 
         return Optional.of(assignSst(zone, token));
     }
@@ -133,7 +135,11 @@ public class ScrapeStopper {
     }
 
     private ValidationRate getValidationRate(String zone) {
-        return validationRatePerZone.computeIfAbsent(zone, z -> new ValidationRate(100));
+        return validationRatePerZone.computeIfAbsent(zone, z -> new ValidationRate(InstantSource.system()));
+    }
+
+    public boolean isStrained(String zone, double threshold) {
+        return getValidationRate(zone).isStrained(threshold);
     }
 
 }
@@ -170,14 +176,15 @@ class Token {
         if (!Objects.equals(remoteIp, this.remoteIp))
             return ScrapeStopper.TokenState.INVALID;
 
-        if (context != null && Objects.equals(lastContext,context))
-            return ScrapeStopper.TokenState.VALIDATED;
-
         if (Instant.now().isBefore(validAfter))
             return ScrapeStopper.TokenState.EARLY;
 
         if (Instant.now().isAfter(validUntil))
             return ScrapeStopper.TokenState.INVALID;
+
+        // Short circuit
+        if (context != null && Objects.equals(lastContext,context))
+            return ScrapeStopper.TokenState.VALIDATED;
 
         var lastValidation = this.lastValidation;
 
@@ -214,66 +221,64 @@ class Token {
     }
 
     public Duration timeUntilValid() {
-        return Duration.between(Instant.now(), validAfter);
+        // assignSst may hand out a token that is already past validAfter,
+        // so clamp to zero to avoid reporting a negative wait
+        Duration remaining = Duration.between(Instant.now(), validAfter);
+
+        if (remaining.isNegative())
+            return Duration.ZERO;
+
+        return remaining;
     }
 
     public boolean isExpired() {
         return Instant.now().isAfter(validUntil) || remainingUses.getAcquire() <= 0;
     }
+
 }
 
 class ValidationRate {
-    private final int maxSize;
+    private static final double DELAY_MIN = 1.0;
+    private static final double DELAY_MAX = 5.0;
 
-    private double target;
+    private final InstantSource clock;
+    private final LongAdder validationCount = new LongAdder();
+    private Instant lastUpdate;
 
-    private volatile double delay;
-    private double delayMin;
-    private double delayMax;
+    private volatile double delay = DELAY_MIN;
 
-    private final LinkedList<Instant> validations = new LinkedList<>();
-
-    public ValidationRate(int maxSize) {
-        this.maxSize = maxSize;
-
-        this.target = 2.0;
-        this.delay = 1.;
-        this.delayMin = 1.0;
-        this.delayMax = 5.;
+    public ValidationRate(InstantSource clock) {
+        this.clock = clock;
+        this.lastUpdate = clock.instant();
     }
 
-    public synchronized void register() {
-        validations.addLast(Instant.now());
-
-        if (validations.size() > maxSize) {
-            validations.removeFirst();
-        }
+    public void register() {
+        validationCount.increment();
     }
 
-    public synchronized void updateTarget() {
-        if (validations.size() < maxSize/2) {
+    public synchronized void updateDelay() {
+        Instant now = clock.instant();
+        double elapsedSecs = Duration.between(lastUpdate, now).toMillis() / 1000.;
+        lastUpdate = now;
+
+        if (elapsedSecs <= 0)
             return;
-        }
 
-        long millisBetween = Duration.between(validations.getFirst(), validations.getLast()).toMillis();
+        double measuredRps = validationCount.sumThenReset() / elapsedSecs;
 
-        double secs = millisBetween / 1000.;
-        double interval = secs / (validations.size()-1);
-
-        // Delay and target rate accidentally is of the same order of magnitude [1...5]
-        // which makes this a bit easier
-
-        double delta = target - interval;
-
-        delay = Math.clamp(delay + delta, delayMin, delayMax);
+        delay = Math.clamp(measuredRps, DELAY_MIN, DELAY_MAX);
     }
 
     public Duration getDelay() {
         return Duration.ofMillis((long)(1000*delay));
     }
 
+    public boolean isStrained(double threshold) {
+        return getStrain() > threshold;
+    }
+
     public double getStrain() {
-        return (delay - delayMin) / (delayMax - delayMin);
+        return (delay - DELAY_MIN) / (DELAY_MAX - DELAY_MIN);
     }
 
 }

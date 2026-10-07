@@ -9,7 +9,6 @@ import nu.marginalia.functions.searchquery.QueryGRPCService;
 import nu.marginalia.linkgraph.AggregateLinkGraphService;
 import nu.marginalia.service.server.BaseServiceParams;
 import nu.marginalia.service.server.JoobyService;
-import nu.marginalia.service.server.SparkService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,6 +54,7 @@ public class QueryService extends JoobyService {
 
         if (!Boolean.getBoolean("noQdebug")) {
             jooby.get("/qdebug", queryDebugInterface::handleAdvanced);
+            jooby.get("/qdebug/json", queryDebugInterface::handleAdvancedJson);
         }
 
         jooby.error(Exception.class, (ctx, e, code) -> {

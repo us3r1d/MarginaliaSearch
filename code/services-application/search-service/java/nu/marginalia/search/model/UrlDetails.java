@@ -5,10 +5,16 @@ import nu.marginalia.api.searchquery.model.results.SearchResultKeywordScore;
 import nu.marginalia.model.EdgeUrl;
 import nu.marginalia.model.crawl.DomainIndexingState;
 import nu.marginalia.model.crawl.HtmlFeature;
+import nu.marginalia.model.crawl.PubDate;
 import nu.marginalia.model.idx.DocumentMetadata;
+import org.jetbrains.annotations.Nullable;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * A class to hold details about a single search result.
@@ -17,7 +23,10 @@ public class UrlDetails implements Comparable<UrlDetails> {
     public long id;
     public int domainId;
 
-    public EdgeUrl url;
+    private EdgeUrl url;
+    @Nullable
+    public String redirUrl;
+
     public String title;
     public String description;
 
@@ -37,10 +46,31 @@ public class UrlDetails implements Comparable<UrlDetails> {
     public SearchResultItem resultItem;
     public List<SearchResultKeywordScore> keywordScores;
 
-    public UrlDetails(long id, int domainId, EdgeUrl url, String title, String description, String format, int features, DomainIndexingState domainState, double termScore, int resultsFromSameDomain, String positions, long positionsMask, int positionsCount, SearchResultItem resultItem, List<SearchResultKeywordScore> keywordScores) {
+    public int pubDate;
+
+    private static final DateTimeFormatter DISPLAY_DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+    public UrlDetails(long id,
+                      int domainId,
+                      EdgeUrl url,
+                      String redirUrl,
+                      String title,
+                      String description,
+                      String format,
+                      int features,
+                      DomainIndexingState domainState,
+                      double termScore,
+                      int resultsFromSameDomain,
+                      int pubDate,
+                      String positions,
+                      long positionsMask,
+                      int positionsCount,
+                      SearchResultItem resultItem,
+                      List<SearchResultKeywordScore> keywordScores) {
         this.id = id;
         this.domainId = domainId;
         this.url = url;
+        this.redirUrl = redirUrl;
         this.title = title;
         this.description = description;
         this.format = format;
@@ -48,6 +78,7 @@ public class UrlDetails implements Comparable<UrlDetails> {
         this.domainState = domainState;
         this.termScore = termScore;
         this.resultsFromSameDomain = resultsFromSameDomain;
+        this.pubDate = pubDate;
         this.positions = positions;
         this.positionsCount = positionsCount;
         this.positionsMask = positionsMask;
@@ -61,6 +92,19 @@ public class UrlDetails implements Comparable<UrlDetails> {
 
     public boolean hasMoreResults() {
         return resultsFromSameDomain > 1;
+    }
+
+    public boolean hasDisplayDate() {
+        return pubDate > 0;
+    }
+
+    public String getDisplayDate() {
+        if (pubDate <= 0) return null;
+        LocalDate date = PubDate.fromDateShort(pubDate);
+
+        // date is nullable iff pubDate is <= 0
+
+        return DISPLAY_DATE_FORMAT.format(date);
     }
 
     public String getFormat() {
@@ -133,16 +177,16 @@ public class UrlDetails implements Comparable<UrlDetails> {
             else if (!Character.isAlphabetic(c) && !Character.isWhitespace(c)) {
                 distSinceBreak = 0;
                 sb.appendCodePoint(c);
-                sb.append("&shy;");
+                sb.append("<wbr>");
             }
             else if (Character.isUpperCase(c) && Character.isLowerCase(prevC)) {
                 distSinceBreak = 0;
-                sb.append("&shy;");
+                sb.append("<wbr>");
                 sb.appendCodePoint(c);
             }
             else if (distSinceBreak > 16) {
                 distSinceBreak = 0;
-                sb.append("&shy;");
+                sb.append("<wbr>");
                 sb.appendCodePoint(c);
             }
             else {
@@ -179,12 +223,12 @@ public class UrlDetails implements Comparable<UrlDetails> {
             }
             else if (!Character.isAlphabetic(c) && distSinceSpace > 24) {
                 sb.appendCodePoint(c);
-                sb.append("&shy;");
+                sb.append("<wbr>");
                 distSinceSpace = 0;
             }
             else if (distSinceSpace > 48) {
                 sb.appendCodePoint(c);
-                sb.append("&shy;");
+                sb.append("<wbr>");
                 distSinceSpace = 0;
             }
             else {
@@ -195,11 +239,19 @@ public class UrlDetails implements Comparable<UrlDetails> {
         return sb.toString();
     }
 
+    private String displayUrl = null;
+
     /** Helper that inserts hyphenation hints and escapes
      * semantically meaningful codepoints into entity codes */
     public String displayUrl() {
+        if (null != displayUrl) return displayUrl;
+
         StringBuilder sb = new StringBuilder();
         String urlStr = url.toDisplayString();
+        boolean censorUrl = redirUrl != null;
+
+        Random r = new Random(urlStr.hashCode());
+
         for (int i = 0; i < urlStr.length(); i++) {
             char c = urlStr.charAt(i);
 
@@ -214,14 +266,28 @@ public class UrlDetails implements Comparable<UrlDetails> {
             }
             else if (!Character.isAlphabetic(c) && !Character.isWhitespace(c)) {
                 sb.appendCodePoint(c);
-                sb.append("&shy;");
+                sb.append("<wbr>");
             }
             else {
-                sb.appendCodePoint(c);
+                if (censorUrl && r.nextDouble() < 0.1) {
+                    sb.append('*');
+                }
+                else {
+                    sb.appendCodePoint(c);
+                }
             }
         }
 
-        return sb.toString();
+        displayUrl = sb.toString();
+
+        return displayUrl;
+    }
+
+    public String userFacingUrl() {
+        if (redirUrl != null) {
+            return redirUrl;
+        }
+        return url.toString();
     }
 
     @Override

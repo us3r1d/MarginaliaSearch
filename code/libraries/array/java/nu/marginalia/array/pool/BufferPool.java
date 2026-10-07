@@ -1,6 +1,7 @@
 package nu.marginalia.array.pool;
 
 import nu.marginalia.ffi.LinuxSystemCalls;
+import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,6 +15,7 @@ import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 
 public class BufferPool implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(BufferPool.class);
@@ -29,6 +31,12 @@ public class BufferPool implements AutoCloseable {
 
     private final AtomicLong diskReadCount = new AtomicLong();
     private final AtomicLong cacheReadCount = new AtomicLong();
+    private final AtomicLong readAheadCount = new AtomicLong();
+    private final AtomicLong readAheadSkippedCount = new AtomicLong();
+
+    public static final int MAX_READ_AHEAD = 8;
+
+    private final ThreadLocal<MemorySegment> readAheadIovecs;
 
     private volatile boolean running = true;
 
@@ -45,7 +53,6 @@ public class BufferPool implements AutoCloseable {
         poolLru = new PoolLru(pages);
     }
 
-
     public BufferPool(Path filename, int pageSizeBytes, int poolSize) {
         this.fd = LinuxSystemCalls.openDirect(filename);
         this.pageSizeBytes = pageSizeBytes;
@@ -55,6 +62,7 @@ public class BufferPool implements AutoCloseable {
             throw new RuntimeException(e);
         }
         this.arena = Arena.ofShared();
+        this.readAheadIovecs = ThreadLocal.withInitial(this::allocateIovecBuffer);
         this.pages = new MemoryPage[poolSize];
 
         MemorySegment memoryArea = arena.allocate((long) pageSizeBytes*poolSize, 4096);
@@ -68,38 +76,47 @@ public class BufferPool implements AutoCloseable {
         }
 
         this.poolLru = new PoolLru(pages);
+        this.monitorThread = Thread.ofPlatform().start(this::statsThread);
+    }
 
-        monitorThread = Thread.ofPlatform().start(() -> {
-            int diskReadOld = 0;
-            int cacheReadOld = 0;
+    // Buffer for preadv-calls for readahead
+    private MemorySegment allocateIovecBuffer() {
+        return arena.allocate(16L * (MAX_READ_AHEAD + 1), 8);
+    }
 
-            while (running) {
-                try {
-                    TimeUnit.SECONDS.sleep(30);
-                } catch (InterruptedException e) {
-                    logger.info("Sleep interrupted", e);
-                    break;
-                }
+    private void statsThread() {
+        if (!Boolean.getBoolean("index.printPoolStats")) {
+            return;
+        }
 
-                long diskRead = diskReadCount.get();
-                long cacheRead = cacheReadCount.get();
-                int heldCount = 0;
-                for (var page : pages) {
-                    if (page.isHeld()) {
-                        heldCount++;
-                    }
-                }
+        int diskReadOld = 0;
+        int cacheReadOld = 0;
 
-                if (diskRead != diskReadOld || cacheRead != cacheReadOld) {
-                    logger.info("[#{}:{}] Disk/Cached: {}/{}, heldCount={}/{}, fqs={}, rcc={}",
-                            hashCode(), pageSizeBytes,
-                            diskRead, cacheRead,
-                            heldCount, pages.length,
-                            poolLru.getFreeQueueSize(), poolLru.getReclaimCycles());
+        while (running) {
+            try {
+                TimeUnit.SECONDS.sleep(30);
+            } catch (InterruptedException e) {
+                logger.info("Sleep interrupted", e);
+                break;
+            }
+
+            long diskRead = diskReadCount.get();
+            long cacheRead = cacheReadCount.get();
+            int heldCount = 0;
+            for (var page : pages) {
+                if (page.isHeld()) {
+                    heldCount++;
                 }
             }
-        });
 
+            if (diskRead != diskReadOld || cacheRead != cacheReadOld) {
+                logger.info("[#{}:{}] Disk/Cached: {}/{}, readAhead={} (skipped {}), heldCount={}/{}, fqs={}, rcc={}",
+                        hashCode(), pageSizeBytes,
+                        diskRead, cacheRead, readAheadCount.get(), readAheadSkippedCount.get(),
+                        heldCount, pages.length,
+                        poolLru.getFreeQueueSize(), poolLru.getReclaimCycles());
+            }
+        }
     }
 
     public void close() {
@@ -128,6 +145,22 @@ public class BufferPool implements AutoCloseable {
         }
 
 
+    }
+
+    public long getDiskReadCount() {
+        return diskReadCount.get();
+    }
+
+    public long getCacheReadCount() {
+        return cacheReadCount.get();
+    }
+
+    public long getReadAheadCount() {
+        return readAheadCount.get();
+    }
+
+    public long getReadAheadSkippedCount() {
+        return readAheadSkippedCount.get();
     }
 
     @Nullable
@@ -168,6 +201,31 @@ public class BufferPool implements AutoCloseable {
         return buffer;
     }
 
+    /** Reads and returns the page at address, and optionally reads and prepares up to 'readAheadPages'
+     * ahead of the address, left unpinned in the buffer pool.
+     * */
+    public MemoryPage get(long address, int readAheadPages) {
+        MemoryPage buffer = getExistingBufferForReading(address);
+
+        if (buffer != null) {
+            return buffer;
+        }
+
+        readAheadPages = Math.min(readAheadPages, Math.min(MAX_READ_AHEAD, pages.length / 8));
+
+        if (readAheadPages <= 0) {
+            return read(address);
+        }
+        else if (poolLru.getFreeQueueSize() < pages.length / 8) {
+            // Skip readahead due to pressure on the pool
+            readAheadSkippedCount.incrementAndGet();
+            return read(address);
+        }
+        else {
+            return readWithReadAhead(address, readAheadPages);
+        }
+    }
+
     private MemoryPage read(long address) {
         // If the page is not available, read it from the caller's thread
         if (address + pageSizeBytes > fileSize) {
@@ -180,12 +238,73 @@ public class BufferPool implements AutoCloseable {
         poolLru.register(buffer);
         populateBuffer(buffer);
 
-        if (!buffer.pinCount().compareAndSet(-1, 1)) {
+        if (buffer.pinCount().getAndAdd(1 - MemoryPage.WRITE_LOCKED) >= 0) {
             throw new IllegalStateException("Panic! Write lock was not held during write!");
         }
         diskReadCount.incrementAndGet();
 
         return buffer;
+    }
+
+    private MemoryPage readWithReadAhead(long address, int readAhead) {
+        if (address + pageSizeBytes > fileSize) {
+            throw new RuntimeException("Address " + address + " too large for page size " + pageSizeBytes + " and file size " + fileSize);
+        }
+        if ((address & 511) != 0) {
+            throw new  RuntimeException("Address " + address + " not aligned");
+        }
+
+        MemoryPage[] batch = new MemoryPage[readAhead + 1];
+        int n = 0;
+
+        batch[n] = acquireFreePage(address);
+        poolLru.register(batch[n++]);
+
+        for (int i = 1; i <= readAhead; i++) {
+            long next = address + (long) i * pageSizeBytes;
+            if (next + pageSizeBytes > fileSize)
+                break;
+
+            MemoryPage resident = poolLru.get(next);
+            if (resident != null && resident.pageAddress() == next)
+                break;
+
+            batch[n] = acquireFreePage(next);
+            poolLru.register(batch[n++]);
+        }
+
+        readPages(batch, n, address);
+
+        for (int i = 0; i < n; i++) {
+            batch[i].dirty(false);
+        }
+
+        for (int i = 1; i < n; i++) { // Leave readahead unpinned, could be claimed or overwritten
+            batch[i].pinCount().addAndGet(-MemoryPage.WRITE_LOCKED);
+        }
+
+        if (batch[0].pinCount().getAndAdd(1 - MemoryPage.WRITE_LOCKED) >= 0) { // Pin requested page
+            throw new IllegalStateException("Panic! Write lock was not held during write!");
+        }
+
+        diskReadCount.addAndGet(n);
+        readAheadCount.addAndGet(n - 1);
+
+        return batch[0];
+    }
+
+    private void readPages(MemoryPage[] batch, int n, long address) {
+        MemorySegment iovecs = readAheadIovecs.get();
+        for (int i = 0; i < n; i++) {
+            iovecs.setAtIndex(ValueLayout.JAVA_LONG, 2L * i, batch[i].getMemorySegment().address());
+            iovecs.setAtIndex(ValueLayout.JAVA_LONG, 2L * i + 1, pageSizeBytes);
+        }
+
+        long expected = (long) n * pageSizeBytes;
+        long read = LinuxSystemCalls.readVectoredAt(fd, iovecs, n, address);
+        if (read != expected) {
+            throw new IllegalStateException("Scatter read returned " + read + " of " + expected + " bytes at " + address);
+        }
     }
 
     private MemoryPage acquireFreePage(long address) {
@@ -207,10 +326,20 @@ public class BufferPool implements AutoCloseable {
     }
 
     private void waitForPageWrite(MemoryPage page) {
-        while (page.dirty()) {
-            Thread.yield();
+        // The writer offers no wakeup signal, so briefly spin for the common
+        // case of a nearly finished write, then poll with a bounded park
+        for (int iter = 0; iter < 128; iter++) {
+            if (!page.dirty()) {
+                return;
+            }
+            Thread.onSpinWait();
         }
 
+        long parkTime = 5_000;
+        while (page.dirty()) {
+            LockSupport.parkNanos(parkTime);
+            parkTime = Math.min(2 * parkTime, 50_000);
+        }
     }
 
 }

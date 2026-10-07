@@ -67,7 +67,12 @@ public class MqOutbox {
     private void poll() {
         try {
             for (long id = 1; run; id++) {
-                pollDb(id);
+                try {
+                    pollDb(id);
+                }
+                catch (Throwable t) {
+                    logger.error("Outbox poll iteration failed", t);
+                }
 
                 TimeUnit.MILLISECONDS.sleep(pollIntervalMs);
             }
@@ -136,13 +141,13 @@ public class MqOutbox {
             while (!pendingResponses.containsKey(id)) {
                 pendingResponses.wait(100);
             }
-
-            var msg = pendingResponses.remove(id);
-            // Mark the response as OK so it can be cleaned up
-            persistence.updateMessageState(msg.msgId(), MqMessageState.OK);
-
-            return msg;
         }
+
+        var msg = pendingResponses.remove(id);
+        // Mark the response as OK so it can be cleaned up
+        persistence.updateMessageState(msg.msgId(), MqMessageState.OK);
+
+        return msg;
     }
 
 
@@ -161,13 +166,13 @@ public class MqOutbox {
 
                 pendingResponses.wait(100);
             }
-
-            var msg = pendingResponses.remove(id);
-            // Mark the response as OK so it can be cleaned up
-            persistence.updateMessageState(msg.msgId(), MqMessageState.OK);
-
-            return msg;
         }
+
+        var msg = pendingResponses.remove(id);
+        // Mark the response as OK so it can be cleaned up
+        persistence.updateMessageState(msg.msgId(), MqMessageState.OK);
+
+        return msg;
     }
 
     /** Polls for a response for the given message id. */

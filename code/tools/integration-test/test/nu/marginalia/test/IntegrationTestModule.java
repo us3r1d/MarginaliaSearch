@@ -5,6 +5,7 @@ import com.google.inject.Inject;
 import com.google.inject.Provides;
 import com.google.inject.Singleton;
 import com.google.inject.name.Names;
+import com.zaxxer.hikari.HikariDataSource;
 import gnu.trove.list.array.TIntArrayList;
 import nu.marginalia.IndexLocations;
 import nu.marginalia.LanguageModels;
@@ -12,8 +13,7 @@ import nu.marginalia.WmsaHome;
 import nu.marginalia.api.domsample.DomSampleClient;
 import nu.marginalia.db.DomainTypes;
 import nu.marginalia.index.journal.IndexJournalSlopWriter;
-import nu.marginalia.index.searchset.DomainRankings;
-import nu.marginalia.index.searchset.SearchSetAny;
+import nu.marginalia.ranking.set.SearchSetAny;
 import nu.marginalia.index.searchset.SearchSetsService;
 import nu.marginalia.language.config.LanguageConfigLocation;
 import nu.marginalia.language.config.LanguageConfiguration;
@@ -42,8 +42,7 @@ import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
-import static nu.marginalia.linkdb.LinkdbFileNames.DOCDB_FILE_NAME;
-import static nu.marginalia.linkdb.LinkdbFileNames.DOMAIN_LINKS_FILE_NAME;
+import static nu.marginalia.linkdb.LinkdbFileNames.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
@@ -95,7 +94,6 @@ public class IntegrationTestModule extends AbstractModule {
 
             SearchSetsService setsServiceMock = Mockito.mock(SearchSetsService.class);
             when(setsServiceMock.getSearchSetByName("NONE")).thenReturn(new SearchSetAny());
-            when(setsServiceMock.getDomainRankings()).thenReturn(new DomainRankings());
             bind(SearchSetsService.class).toInstance(setsServiceMock);
 
             DomainTypes domainTypes = Mockito.mock(DomainTypes.class);
@@ -105,6 +103,11 @@ public class IntegrationTestModule extends AbstractModule {
             bind(DomainTypes.class).toInstance(domainTypes);
 
             bind(ServiceEventLog.class).toInstance(Mockito.mock(ServiceEventLog.class));
+
+            // ProcessEventLog and friends want a database, give them one that throws SQLException (iwhch is swallowed)
+            HikariDataSource dataSourceMock = Mockito.mock(HikariDataSource.class);
+            when(dataSourceMock.getConnection()).thenThrow(new SQLException("No database available in integration tests"));
+            bind(HikariDataSource.class).toInstance(dataSourceMock);
 
             bind(IndexJournalSlopWriter.class).toInstance(new IndexJournalSlopWriter(
                     IndexLocations.getIndexConstructionArea(fileStorageServiceMock),
@@ -129,7 +132,6 @@ public class IntegrationTestModule extends AbstractModule {
             bind(Double.class).annotatedWith(Names.named("min-document-quality")).toInstance(-15.);
             bind(Integer.class).annotatedWith(Names.named("min-document-length")).toInstance(32);
             bind(Integer.class).annotatedWith(Names.named("max-title-length")).toInstance(128);
-            bind(Integer.class).annotatedWith(Names.named("max-summary-length")).toInstance(255);
 
             bind(Path.class).annotatedWith(Names.named("local-index-path")).toInstance(indexDir);
 

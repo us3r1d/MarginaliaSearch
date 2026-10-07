@@ -4,7 +4,7 @@ plugins {
     id 'application'
     id 'com.gradleup.shadow'
     id 'jvm-test-suite'
-    id 'com.google.cloud.tools.jib' version '3.4.5'
+    id 'com.google.cloud.tools.jib' version '3.5.4'
 }
 
 application {
@@ -25,6 +25,7 @@ java {
 apply from: "$rootProject.projectDir/srcsets.gradle"
 
 dependencies {
+    compileOnly libs.jsr305
     implementation project(':code:common:config')
     implementation project(':code:common:service')
     implementation project(':code:common:model')
@@ -39,6 +40,8 @@ dependencies {
     implementation project(':code:index:live-capture:api')
 
     implementation project(':code:libraries:domain-lock')
+    implementation project(':code:libraries:message-queue')
+    implementation project(':code:processes:process-mq-api')
 
     implementation project(':code:index')
     implementation project(':code:functions:link-graph:partition')
@@ -50,7 +53,6 @@ dependencies {
     testImplementation project(path: ':code:services-core:control-service')
 
     implementation libs.bundles.slf4j
-    implementation libs.bundles.jetty
     implementation libs.prometheus
     implementation libs.bundles.jooby
     implementation libs.notnull
@@ -66,7 +68,6 @@ dependencies {
     implementation libs.trove
     implementation libs.fastutil
     implementation libs.bundles.gson
-    implementation libs.guava
     libs.bundles.grpc.get().each {
         implementation dependencies.create(it) {
             exclude group: 'com.google.guava'

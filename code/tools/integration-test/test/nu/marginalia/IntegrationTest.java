@@ -20,9 +20,9 @@ import nu.marginalia.index.model.SearchContext;
 import nu.marginalia.index.results.IndexResultRankingService;
 import nu.marginalia.index.reverse.construction.full.FullIndexConstructor;
 import nu.marginalia.index.reverse.construction.prio.PrioIndexConstructor;
-import nu.marginalia.index.searchset.DomainRankings;
-import nu.marginalia.index.searchset.SearchSetAny;
-import nu.marginalia.index.searchset.connectivity.ConnectivityView;
+import nu.marginalia.ranking.DomainRankings;
+import nu.marginalia.ranking.set.SearchSetAny;
+import nu.marginalia.ranking.connectivity.ConnectivityView;
 import nu.marginalia.io.SerializableCrawlDataStream;
 import nu.marginalia.language.config.LanguageConfiguration;
 import nu.marginalia.language.keywords.KeywordHasher;
@@ -55,7 +55,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 
-import static nu.marginalia.linkdb.LinkdbFileNames.DOCDB_FILE_NAME;
+import static nu.marginalia.linkdb.LinkdbFileNames.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
@@ -246,7 +246,7 @@ public class IntegrationTest {
             System.out.println(query);
 
             var rs = new IndexQueryExecution(indexReference.get(), documentDbReader, rankingService,
-                    SearchContext.create(indexReference.get(), new KeywordHasher.AsciiIsh(), query.indexQuery, new SearchSetAny(), ConnectivityView.empty()), 1).run();
+                    SearchContext.create(indexReference.get(), 1, new KeywordHasher.AsciiIsh(), query.indexQuery, new SearchSetAny(), ConnectivityView.empty()), 1).run();
 
             System.out.println(rs);
             Assertions.assertEquals(1, rs.size());
@@ -268,7 +268,7 @@ public class IntegrationTest {
             System.out.println(query);
 
             var rs = new IndexQueryExecution(indexReference.get(), documentDbReader, rankingService,
-                    SearchContext.create(indexReference.get(), new KeywordHasher.AsciiIsh(), query.indexQuery, new SearchSetAny(), ConnectivityView.empty()), 1).run();
+                    SearchContext.create(indexReference.get(), 1, new KeywordHasher.AsciiIsh(), query.indexQuery, new SearchSetAny(), ConnectivityView.empty()), 1).run();
 
             System.out.println(rs);
             Assertions.assertEquals(1, rs.size());
@@ -379,7 +379,7 @@ public class IntegrationTest {
 
 //            System.out.println(query);
 
-            var rs = new IndexQueryExecution(indexReference.get(), documentDbReader, rankingService, SearchContext.create(indexReference.get(), new KeywordHasher.AsciiIsh(), query.indexQuery, new SearchSetAny(), ConnectivityView.empty()), 1).run();
+            var rs = new IndexQueryExecution(indexReference.get(), documentDbReader, rankingService, SearchContext.create(indexReference.get(), 1, new KeywordHasher.AsciiIsh(), query.indexQuery, new SearchSetAny(), ConnectivityView.empty()), 1).run();
 
             System.out.println(rs);
 
@@ -443,11 +443,13 @@ public class IntegrationTest {
         Path outputFileDocsId = IndexFileName.resolve(IndexLocations.getCurrentIndex(fileStorageService), new IndexFileName.ForwardDocIds(), IndexFileName.Version.NEXT);
         Path outputFileDocsData = IndexFileName.resolve(IndexLocations.getCurrentIndex(fileStorageService), new IndexFileName.ForwardDocData(), IndexFileName.Version.NEXT);
         Path outputFileSpansData = IndexFileName.resolve(IndexLocations.getCurrentIndex(fileStorageService), new IndexFileName.ForwardSpansData(), IndexFileName.Version.NEXT);
+        Path outputFileDocTextsData = IndexFileName.resolve(IndexLocations.getCurrentIndex(fileStorageService), new IndexFileName.ForwardDocTextsData(), IndexFileName.Version.NEXT);
 
         ForwardIndexConverter converter = new ForwardIndexConverter(new FakeProcessHeartbeat(),
                 outputFileDocsId,
                 outputFileDocsData,
                 outputFileSpansData,
+                outputFileDocTextsData,
                 IndexJournal.findJournals(workDir, languageConfiguration.languages()).values(),
                 domainRankings
         );

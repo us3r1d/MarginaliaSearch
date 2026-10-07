@@ -2,10 +2,11 @@ package nu.marginalia.index;
 
 import it.unimi.dsi.fastutil.ints.IntList;
 import it.unimi.dsi.fastutil.longs.*;
-import nu.marginalia.api.searchquery.model.compiled.aggregate.CompiledQueryAggregates;
 import nu.marginalia.api.searchquery.model.query.SpecificationLimitType;
 import nu.marginalia.array.page.LongQueryBuffer;
+import nu.marginalia.index.config.ForwardIndexParameters;
 import nu.marginalia.index.forward.ForwardIndexReader;
+import nu.marginalia.index.forward.doctext.DocTextDecoder;
 import nu.marginalia.index.forward.spans.DecodableDocumentSpans;
 import nu.marginalia.index.model.*;
 import nu.marginalia.index.reverse.FullReverseIndexReader;
@@ -18,6 +19,8 @@ import nu.marginalia.model.id.UrlIdCodec;
 import nu.marginalia.model.idx.DocumentMetadata;
 import nu.marginalia.sequence.CodedSequence;
 import nu.marginalia.skiplist.SkipListReader;
+import nu.marginalia.skiplist.SkipListValueReader;
+import nu.marginalia.skiplist.ValueBatchContext;
 import nu.marginalia.skiplist.SkipListValueRanges;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -25,17 +28,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.CheckReturnValue;
-import java.io.IOException;
-import java.lang.foreign.Arena;
-import java.util.ArrayList;
-import java.util.BitSet;
-import java.util.Collections;
-import java.util.List;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.SegmentAllocator;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import java.util.function.Predicate;
 
 /** A reader for the combined forward and reverse indexes.
  * <p></p>
@@ -92,19 +91,6 @@ public class CombinedIndexReader {
         }
 
         final IndexLanguageContext languageContext = context.languageContext;
-        final long[] termPriority = context.sortedDistinctIncludes((a,b) -> Long.compare(
-            numHits(languageContext, a),
-            numHits(languageContext, b)
-        ));
-
-        List<IndexQueryBuilder> queryHeads = new ArrayList<>(10);
-        List<LongSet> paths = CompiledQueryAggregates.queriesAggregate(context.compiledQueryIds);
-
-        // Remove any paths that do not contain all prioritized terms, as this means
-        // the term is missing from the index and can never be found
-        paths.removeIf(containsAll(termPriority).negate());
-
-        Long2ObjectOpenHashMap<String> termIdToString = context.termIdToString;
 
         @Nullable
         SkipListValueRanges mandatoryDocumentRanges = context.mandatoryDomainIds.isEmpty() ? null : getDocumentRangesForDomains(context.mandatoryDomainIds);
@@ -112,68 +98,14 @@ public class CombinedIndexReader {
         @Nullable
         SkipListValueRanges excludedDocumentRanges = context.excludedDomainIds.isEmpty() ? null : getDocumentRangesForDomains(context.excludedDomainIds);
 
-        List<String> domainTerms = new ArrayList<>(context.termIdsDomain.size());
-        for (long id : context.termIdsDomain) {
-            domainTerms.add(termIdToString.getOrDefault(id, "???"));
-        }
+        List<TermSlotGroup> groups = TermSlotGroup.fromPaths(context.compiledQueryIds, context.compiledQuery.variantClasses);
 
-        for (var path : paths) {
-            LongList elements = new LongArrayList(path);
+        List<IndexQueryBuilder> queryHeads = new ArrayList<>(10);
 
-            elements.sort((a, b) -> {
-                for (long l : termPriority) {
-                    if (l == a)
-                        return -1;
-                    if (l == b)
-                        return 1;
-                }
-                return 0;
-            });
-
-            if (mandatoryDocumentRanges != null || context.termIdsDomain.isEmpty()) {
-                IndexQueryBuilder head = findFullWord(languageContext, mandatoryDocumentRanges, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
-                if (!head.isNoOp()) {
-                    for (int i = 1; i < elements.size(); i++) {
-                        head.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
-                    }
-                    queryHeads.add(head);
-                }
-            }
-            if (!context.termIdsDomain.isEmpty()) {
-                IndexQueryBuilder head = findFullWord(languageContext, null, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
-                if (!head.isNoOp()) {
-                    for (int i = 1; i < elements.size(); i++) {
-                        head.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
-                    }
-                    head.addInclusionFilter(hasAnyWordFull(languageContext, domainTerms, context.termIdsDomain, context.budget));
-                    queryHeads.add(head);
-                }
-            }
-
-            // If there are few paths, we can afford to check the priority index as well
-            if (paths.size() < 4 && context.termIdsDomain.size() < 4) {
-                if (mandatoryDocumentRanges != null || context.termIdsDomain.isEmpty()) {
-                    IndexQueryBuilder prioHead = findPriorityWord(languageContext, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
-                    if (!prioHead.isNoOp()) {
-                        for (int i = 1; i < elements.size(); i++) {
-                            prioHead.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
-                        }
-                        if (mandatoryDocumentRanges != null) {
-                            prioHead.requiringDomains(mandatoryDocumentRanges);
-                        }
-                        queryHeads.add(prioHead);
-                    }
-                }
-                if (!context.termIdsDomain.isEmpty()) {
-                    IndexQueryBuilder head = findPriorityWord(languageContext, termIdToString.getOrDefault(elements.getLong(0), "???"), elements.getLong(0));
-                    if (!head.isNoOp()) {
-                        for (int i = 1; i < elements.size(); i++) {
-                            head.addInclusionFilter(hasWordFull(languageContext, termIdToString.getOrDefault(elements.getLong(i), "???"), elements.getLong(i), context.budget));
-                        }
-                        head.addInclusionFilter(hasAnyWordFull(languageContext, domainTerms, context.termIdsDomain, context.budget));
-                        queryHeads.add(head);
-                    }
-                }
+        for (TermSlotGroup group : groups) {
+            for (TermSlotGroup.Plan plan : group.plan(termId -> numHits(languageContext, termId), context.termFreqDocCount())) {
+                addQueryHeads(queryHeads, context, false, plan.head(), plan.filters(), mandatoryDocumentRanges);
+                addQueryHeads(queryHeads, context, true, plan.head(), plan.filters(), mandatoryDocumentRanges);
             }
         }
 
@@ -184,11 +116,11 @@ public class CombinedIndexReader {
 
             // Require terms are a special case, mandatory but not ranked, and exempt from re-writing
             for (long termId : context.termIdsRequire) {
-                query = query.also(termIdToString.getOrDefault(termId, "???"), termId, context.budget);
+                query = query.also(termName(context, termId), termId, context.budget);
             }
 
             for (long termId : context.termIdsExcludes) {
-                query = query.not(termIdToString.getOrDefault(termId, "???"), termId, context.budget);
+                query = query.not(termName(context, termId), termId, context.budget);
             }
 
             // Run these filter steps last, as they'll worst-case cause as many page faults as there are
@@ -203,9 +135,140 @@ public class CombinedIndexReader {
                 .toList();
     }
 
-    private Predicate<LongSet> containsAll(long[] permitted) {
-        LongSet permittedTerms = new LongOpenHashSet(permitted);
-        return permittedTerms::containsAll;
+    private void addQueryHeads(List<IndexQueryBuilder> queryHeads,
+                               SearchContext context,
+                               boolean priority,
+                               long headTerm,
+                               List<LongList> filterSlots,
+                               @Nullable SkipListValueRanges mandatoryDocumentRanges)
+    {
+        if (mandatoryDocumentRanges != null || context.termIdsDomain.isEmpty()) {
+            IndexQueryBuilder head = findWord(context, priority, headTerm, mandatoryDocumentRanges);
+            if (!head.isNoOp()) {
+                addSlotFilters(head, context, filterSlots);
+                queryHeads.add(head);
+            }
+        }
+
+        if (!context.termIdsDomain.isEmpty()) {
+            IndexQueryBuilder head = findWord(context, priority, headTerm, null);
+            if (!head.isNoOp()) {
+                addSlotFilters(head, context, filterSlots);
+                head.addInclusionFilter(hasAnyWordFull(context.languageContext, termNames(context, context.termIdsDomain), context.termIdsDomain, context.budget));
+                queryHeads.add(head);
+            }
+        }
+    }
+
+    private IndexQueryBuilder findWord(SearchContext context,
+                                       boolean priority,
+                                       long termId,
+                                       @Nullable SkipListValueRanges ranges)
+    {
+        String term = termName(context, termId);
+
+        if (!priority) {
+            return findFullWord(context.languageContext, ranges, term, termId);
+        }
+        else {
+            IndexQueryBuilder head = findPriorityWord(context.languageContext, term, termId);
+
+            // The priority index has no range filtered source, so the restriction is applied as a filter instead
+            if (ranges != null) {
+                head.requiringDomains(ranges);
+            }
+
+            return head;
+        }
+    }
+
+    private void addSlotFilters(IndexQueryBuilder head, SearchContext context, List<LongList> slots) {
+        for (LongList slot : slots) {
+            if (slot.size() == 1) {
+                long termId = slot.getLong(0);
+                head.addInclusionFilter(hasWordFull(context.languageContext, termName(context, termId), termId, context.budget));
+            }
+            else {
+                head.addInclusionFilter(hasAnyWordFull(context.languageContext, termNames(context, slot), slot, context.budget));
+            }
+        }
+    }
+
+    private static String termName(SearchContext context, long termId) {
+        return context.termIdToString.getOrDefault(termId, "???");
+    }
+
+    private static List<String> termNames(SearchContext context, LongList termIds) {
+        List<String> names = new ArrayList<>(termIds.size());
+        for (long termId : termIds) {
+            names.add(termName(context, termId));
+        }
+        return names;
+    }
+
+    public List<IndexQuery> createUnrankedQueries(UnrankedSearchContext context) {
+
+        if (!isLoaded()) {
+            logger.warn("Index reader not ready");
+            return Collections.emptyList();
+        }
+
+        final IndexLanguageContext languageContext = context.languageContext;
+
+        final long[] termSortOrder = context.sortedDistinctIncludes((a,b) -> Long.compare(
+                numHits(languageContext, a),
+                numHits(languageContext, b)
+        ));
+
+        LongList searchTerms = new LongArrayList(context.termIdsRequireUnique);
+
+        // Sort in order of size in the index
+        searchTerms.sort((a, b) -> {
+            for (long l : termSortOrder) {
+                if (l == a)
+                    return -1;
+                if (l == b)
+                    return 1;
+            }
+            return 0;
+        });
+
+        Long2ObjectOpenHashMap<String> termIdToString = context.termIdToString;
+
+        IndexQueryBuilder head;
+
+        long firstTermId = searchTerms.getLong(0);
+        String firstTerm = termIdToString.getOrDefault(firstTermId, "???");
+
+        if (context.afterCombinedDocId != 0)
+            head = findFullWord(languageContext,
+                    getDocumentRangesAfterDocId(context.afterCombinedDocId),
+                    firstTerm,
+                    firstTermId);
+        else
+            head = findFullWord(languageContext,
+                    null,
+                    firstTerm,
+                    firstTermId);
+
+        if (head.isNoOp()) {
+            return List.of();
+        }
+
+        if (!context.excludedDomainIds.isEmpty())
+            head.rejectingDomains(getDocumentRangesForDomains(context.excludedDomainIds));
+        if (!context.mandatoryDomainIds.isEmpty())
+            head.requiringDomains(getDocumentRangesForDomains(context.mandatoryDomainIds));
+
+        for (long termId : context.termIdsRequire) {
+            head = head.also(termIdToString.getOrDefault(termId, "???"), termId, context.budget);
+        }
+
+        for (long termId : context.termIdsExcludes) {
+            head = head.not(termIdToString.getOrDefault(termId, "???"), termId, context.budget);
+        }
+
+        return List.of(head.build());
     }
 
     /** Returns the number of occurrences of the word in the priority index */
@@ -253,16 +316,27 @@ public class CombinedIndexReader {
         return newQueryBuilder(languageContext, query).withSourceTerms(termId);
     }
 
-    private SkipListValueRanges getDocumentRangesForDomains(@NotNull IntList domainIds) {
+    SkipListValueRanges getDocumentRangesForDomains(@NotNull IntList domainIds) {
         long[] rangesStarts = new long[domainIds.size()];
         long[] rangesEnds = new long[domainIds.size()];
 
         for (int i = 0; i < domainIds.size(); i++) {
             rangesStarts[i] = forwardIndexReader.getRankEncodedDocumentIdBase(domainIds.getInt(i));
+        }
+        Arrays.sort(rangesStarts);
+        for (int i = 0; i < rangesStarts.length; i++) {
             rangesEnds[i] = rangesStarts[i] + UrlIdCodec.DOCORD_COUNT;
         }
 
         return new SkipListValueRanges(rangesStarts, rangesEnds);
+    }
+
+    private SkipListValueRanges getDocumentRangesAfterDocId(long combinedDocId) {
+
+        long start = combinedDocId + 1;
+        long end = Long.MAX_VALUE;
+
+        return new SkipListValueRanges(new long[] { start }, new long[] { end });
     }
 
     /** Creates a parameter matching filter step for the provided parameters */
@@ -273,9 +347,23 @@ public class CombinedIndexReader {
     @Nullable
     @CheckReturnValue
     public SkipListReader.ValueReader getValueReader(SearchContext searchContext,
+                                                     SegmentAllocator allocator,
                                                      long termId,
-                                                     CombinedDocIdList keys) {
-        return reverseIndexFullReader.getValueReader(searchContext, termId, keys);
+                                                     CombinedDocIdList keys,
+                                                     @Nullable ValueBatchContext batchContext) {
+        return reverseIndexFullReader.getValueReader(searchContext, allocator, termId, keys, batchContext);
+    }
+
+    @Nullable
+    public ValueBatchContext createValueBatchContext() {
+        return reverseIndexFullReader.createValueBatchContext();
+    }
+
+    /** The value reader a batch context would be opened against, for checking
+     *  whether a pooled context still belongs to the live index */
+    @Nullable
+    public SkipListValueReader valueReaderIdentity() {
+        return reverseIndexFullReader.valueReaderIdentity();
     }
 
     public BitSet getValuePresence(SearchContext searchContext, long termId, CombinedDocIdList keys) {
@@ -283,8 +371,8 @@ public class CombinedIndexReader {
     }
 
     /** Retrieves the document metadata for the specified document */
-    public long getDocumentMetadata(long docId) {
-        return forwardIndexReader.getDocMeta(docId);
+    public long getDocumentMetadata(long combinedDocId) {
+        return forwardIndexReader.getDocMeta(combinedDocId);
     }
 
     /** Returns the total number of documents in the index */
@@ -293,8 +381,8 @@ public class CombinedIndexReader {
     }
 
     /** Retrieves the HTML features for the specified document */
-    public int getHtmlFeatures(long docId) {
-        return forwardIndexReader.getHtmlFeatures(docId);
+    public int getHtmlFeatures(long combinedDocId) {
+        return forwardIndexReader.getHtmlFeatures(combinedDocId);
     }
 
     /** Retrieves the HTML features for the specified document */
@@ -302,15 +390,61 @@ public class CombinedIndexReader {
         return forwardIndexReader.getDocumentSize(docId);
     }
 
+    public int getDocPubDate(long docId) {
+        return forwardIndexReader.getDocPubDate(docId);
+    }
+
+    /** File descriptors and entry offsets for the batched ranking fetch path */
+
+    public int forwardDataFd() {
+        return forwardIndexReader.dataFd();
+    }
+
+    public int forwardSpansFd() {
+        return forwardIndexReader.spansFd();
+    }
+
+    public int positionsFd() {
+        return reverseIndexFullReader.positionsFd();
+    }
+
+    public long forwardDataOffsetForDoc(long combinedDocId) {
+        return forwardIndexReader.dataOffsetForDoc(combinedDocId);
+    }
+
+    /** Mappings of the same files, for the fetch path that reads resident pages
+     *  directly rather than copying them through the file descriptors */
+
+    public MemorySegment mappedForwardData() {
+        return forwardIndexReader.mappedData();
+    }
+
+    public MemorySegment mappedForwardSpans() {
+        return forwardIndexReader.mappedSpans();
+    }
+
+    public MemorySegment mappedPositions() {
+        return reverseIndexFullReader.mappedPositions();
+    }
+
+    public ForwardIndexParameters.ForwardIndexVersion forwardVersion() {
+        return forwardIndexReader.version();
+    }
+
     /** Retrieves the document spans for the specified documents */
 
     @Nullable
-    public DecodableDocumentSpans getDocumentSpans(Arena arena, long documentId) {
-        return forwardIndexReader.getDocumentSpans(arena, documentId);
+    public DecodableDocumentSpans getDocumentSpans(SegmentAllocator allocator, long documentId) {
+        return forwardIndexReader.getDocumentSpans(allocator, documentId);
     }
 
-    public CodedSequence[] getTermPositions(Arena arena, long[] codedOffsets) {
-        return reverseIndexFullReader.getTermPositions(arena, codedOffsets);
+    @Nullable
+    public String getDocumentText(DocTextDecoder decoder, long documentId) {
+        return forwardIndexReader.getDocumentText(decoder, documentId);
+    }
+
+    public CodedSequence[] getTermPositions(SegmentAllocator allocator, long[] codedOffsets) {
+        return reverseIndexFullReader.getTermPositions(allocator, codedOffsets);
     }
 
     /** Close the indexes.  This blocks the calling thread until all users are finished.
@@ -327,6 +461,9 @@ public class CombinedIndexReader {
         } catch (InterruptedException e) {
             logger.info("Interrupted while waiting for close lock", e);
         }
+
+        // Holding the lock should guarantee this closes all fetchers
+        RankingBatchFetcher.closeForIndex(this);
 
         try {
             forwardIndexReader.close();

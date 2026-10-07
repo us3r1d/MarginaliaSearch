@@ -56,8 +56,6 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
                         .factory()
             );
 
-    private final ScheduledFuture<?> healthCheckJob;
-
     public GrpcSingleNodeChannelPool(ServiceRegistryIf serviceRegistryIf,
                                      ServiceKey<? extends PartitionTraits.Unicast> serviceKey,
                                      Function<InstanceAddress, ManagedChannel> channelConstructor,
@@ -72,21 +70,6 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
 
         serviceRegistryIf.registerMonitor(this);
 
-        onChange();
-
-        healthCheckJob = connectionPoolScheduledJobExecutor.scheduleAtFixedRate(
-                this::checkConnectionHealth, 300, 30, TimeUnit.SECONDS);
-    }
-
-    private synchronized void checkConnectionHealth() {
-
-        for (var channel : channels.values()) {
-            if (!channel.hasRecentError()) {
-                return;
-            }
-        }
-
-        logger.warn(grpcMarker, "Connection pool {} is degraded, attempting to repair", serviceKey);
         onChange();
     }
 
@@ -119,7 +102,6 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
         for (var channel : channels.values()) {
             channel.closeHard();
         }
-        healthCheckJob.cancel(true);
         channels.clear();
     }
 
@@ -277,6 +259,17 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
         return channels.values().stream().sorted().toList();
     }
 
+    public Optional<ConnectionHolder> getBestConnectionHolder() {
+
+        for (var h : getConnectionHolders()) {
+            if (h.hasErrorSince(Duration.ofSeconds(5)))
+                continue;
+            return Optional.of(h);
+        }
+
+        return Optional.empty();
+    }
+
     public <T, I> T call(Function<ManagedChannel, STUB> stubConstructor,
                           BiFunction<STUB, I, T> call,
                           I arg) throws RuntimeException {
@@ -303,6 +296,10 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
                 }
 
                 errorCounter.labelValues(serviceKeyStr).inc();
+
+                if (e instanceof StatusRuntimeException sre && !isInstanceSpecificFailure(sre)) {
+                    throw sre;
+                }
 
                 exceptions.add(e);
             }
@@ -357,6 +354,10 @@ public class GrpcSingleNodeChannelPool<STUB> extends ServiceChangeMonitor {
         }
 
         return ret;
+    }
+
+    private static boolean isInstanceSpecificFailure(StatusRuntimeException e) {
+        return e.getStatus().getCode() == Status.Code.UNAVAILABLE;
     }
 
     private boolean shouldFlagAsError(Exception e) {

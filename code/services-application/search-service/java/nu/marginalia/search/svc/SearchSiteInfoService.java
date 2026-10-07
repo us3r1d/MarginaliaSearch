@@ -46,6 +46,8 @@ import javax.annotation.Nullable;
 import javax.swing.text.NumberFormatter;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.text.NumberFormat;
 import java.time.Duration;
@@ -126,8 +128,18 @@ public class SearchSiteInfoService {
     @Path("/site")
     public ModelAndView<?> handleOverview(@QueryParam String domain) {
         if (domain != null) {
+            // Handle what looks like URLs by parsing them and extracting the domain name
+            if (domain.contains(":") || domain.contains("/")) {
+                if (domain.contains("%")) {
+                    domain = URLDecoder.decode(domain, StandardCharsets.UTF_8);
+                }
+                domain = EdgeUrl.parse(domain)
+                            .map(EdgeUrl::getDomain)
+                            .map(EdgeDomain::toString)
+                            .orElse(domain);
+            }
             // redirect to /site/domainName
-            return new MapModelAndView("redirect.jte", Map.of("url", "/site/"+domain));
+            return new MapModelAndView("redirect.jte", Map.of("url", "/site/"+domain.toLowerCase()));
         }
 
         return new MapModelAndView("siteinfo/start.jte",
@@ -184,7 +196,7 @@ public class SearchSiteInfoService {
             Context context,
             @PathParam String domainName,
             @QueryParam String view,
-            @QueryParam Integer page
+            @QueryParam String cursor
     ) throws SQLException, ExecutionException, TimeoutException {
 
         if (null == domainName || domainName.isBlank()) {
@@ -192,8 +204,6 @@ public class SearchSiteInfoService {
             return new MapModelAndView("redirect.jte", Map.of("url", "/site"));
         }
 
-
-        page = Objects.requireNonNullElse(page, 1);
         view = Objects.requireNonNullElse(view, "info");
 
         ScrapeStopperInterceptor.InterceptionResult interceptResult
@@ -202,7 +212,7 @@ public class SearchSiteInfoService {
         if (interceptResult instanceof ScrapeStopperInterceptor.InterceptRedirect redir) {
             return new MapModelAndView("siteinfo/main.jte",
                     Map.of("model",
-                            new ScrapeStopperModel(redir.sst(), redir.waitTime(), domainName, view, page),
+                            new ScrapeStopperModel(redir.sst(), redir.waitTime(), domainName, redir.redirUrl()),
                             "navbar", NavbarModel.SITEINFO)
             );
         }
@@ -213,8 +223,8 @@ public class SearchSiteInfoService {
         String sst = interceptResult.sst();
 
         SiteInfoModel model = switch (view) {
-            case "links" -> listLinks(domainName, sst, page);
-            case "docs" -> listDocs(domainName, sst, page);
+            case "links" -> listLinks(context, domainName, sst, cursor);
+            case "docs" -> listDocs(context, domainName, sst, cursor);
             case "info" -> listInfo(context, domainName, sst);
             case "traffic" -> listSiteRequests(context, domainName, sst);
             case "availability" -> listAvailabilityEvents(context, domainName, sst);
@@ -310,13 +320,14 @@ public class SearchSiteInfoService {
     }
 
 
-    private Backlinks listLinks(String domainName, String sst, int page) throws TimeoutException {
-        var results = searchOperator.doBacklinkSearch(domainName, page);
+    private Backlinks listLinks(Context ctx, String domainName, String sst, String cursor) throws TimeoutException {
+        var results = searchOperator.doBacklinkSearch(ctx, domainName, cursor);
+
         return new Backlinks(domainName,
                 sst,
                 domainQueries.tryGetDomainId(new EdgeDomain(domainName)).orElse(-1),
                 GroupedUrlDetails.groupResults(results.results),
-                results.resultPages
+                results.cursor
         );
     }
 
@@ -368,11 +379,11 @@ public class SearchSiteInfoService {
             sampleResults = List.of();
         }
         else {
-            sampleResults = searchOperator.doSiteSearch(domainName, domainId, 5, 1).results;
+            sampleResults = searchOperator.doSiteSearch(context, domainName, 5, "").results;
         }
 
         if (!sampleResults.isEmpty()) {
-            url = sampleResults.getFirst().url.withPathAndParam("/", null).toString();
+            url = sampleResults.getFirst().getUrl().withPathAndParam("/", null).toString();
         }
 
 
@@ -453,7 +464,6 @@ public class SearchSiteInfoService {
         try {
             return future.get(250, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
-            logger.info("Failed to get domain data: {}", e.getMessage());
             return fallback.get();
         }
     }
@@ -466,15 +476,15 @@ public class SearchSiteInfoService {
                 .build();
     }
 
-    private Docs listDocs(String domainName, String sst, int page) throws TimeoutException {
+    private Docs listDocs(Context ctx, String domainName, String sst, String cursor) throws TimeoutException {
         int domainId = domainQueries.tryGetDomainId(new EdgeDomain(domainName)).orElse(-1);
-        var results = searchOperator.doSiteSearch(domainName, domainId, 100, page);
+        var results = searchOperator.doSiteSearch(ctx, domainName, 100, cursor);
 
         return new Docs(domainName,
                 sst,
                 domainQueries.tryGetDomainId(new EdgeDomain(domainName)).orElse(-1),
                 results.results.stream().sorted(Comparator.comparing(deets -> -deets.topology)).toList(),
-                results.resultPages
+                results.cursor
                 );
     }
 
@@ -771,20 +781,13 @@ public class SearchSiteInfoService {
     public record ScrapeStopperModel(String sst,
                                      Duration waitTime,
                                      String domain,
-                                     String view,
-                                     int page) implements SiteInfoModel {
-
-        public String redirUrl() {
-            return String.format("?view=%s&page=%d&sst=%s", view, page, sst);
-        }
-
-    }
+                                     String redirUrl) implements SiteInfoModel {}
 
     public record Docs(String domain,
                        String sst,
                        long domainId,
                        List<UrlDetails> results,
-                       List<ResultsPage> pages) implements SiteInfoModel  {
+                       String cursorNext) implements SiteInfoModel  {
 
         public String focusDomain() { return domain; }
 
@@ -799,7 +802,7 @@ public class SearchSiteInfoService {
                             String sst,
                             long domainId,
                             List<GroupedUrlDetails> results,
-                            List<ResultsPage> pages
+                            String cursorNext
                             ) implements SiteInfoModel
     {
         public String query() { return "links:" + domain; }

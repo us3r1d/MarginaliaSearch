@@ -4,8 +4,7 @@ import com.google.inject.AbstractModule;
 import nu.marginalia.IndexLocations;
 import nu.marginalia.index.journal.IndexJournal;
 import nu.marginalia.index.journal.IndexJournalSlopWriter;
-import nu.marginalia.index.searchset.DomainRankings;
-import nu.marginalia.index.searchset.SearchSetAny;
+import nu.marginalia.ranking.set.SearchSetAny;
 import nu.marginalia.index.searchset.SearchSetsService;
 import nu.marginalia.linkdb.docs.DocumentDbReader;
 import nu.marginalia.process.control.FakeProcessHeartbeat;
@@ -21,7 +20,6 @@ import nu.marginalia.storage.FileStorageService;
 import nu.marginalia.storage.model.FileStorageBase;
 import nu.marginalia.storage.model.FileStorageBaseType;
 import nu.marginalia.test.TestUtil;
-import org.apache.curator.framework.CuratorFramework;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -80,7 +78,6 @@ public class IndexQueryServiceIntegrationTestModule extends AbstractModule {
             SearchSetsService setsServiceMock = Mockito.mock(SearchSetsService.class);
             when(setsServiceMock.getSearchSetByName("")).thenReturn(new SearchSetAny());
             when(setsServiceMock.getSearchSetByName("NONE")).thenReturn(new SearchSetAny());
-            when(setsServiceMock.getDomainRankings()).thenReturn(new DomainRankings());
             bind(SearchSetsService.class).toInstance(setsServiceMock);
 
             bind(ServiceEventLog.class).toInstance(Mockito.mock(ServiceEventLog.class));

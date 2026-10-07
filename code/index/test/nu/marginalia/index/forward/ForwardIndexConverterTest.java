@@ -3,7 +3,7 @@ package nu.marginalia.index.forward;
 import nu.marginalia.index.forward.construction.ForwardIndexConverter;
 import nu.marginalia.index.journal.IndexJournal;
 import nu.marginalia.index.journal.IndexJournalSlopWriter;
-import nu.marginalia.index.searchset.DomainRankings;
+import nu.marginalia.ranking.DomainRankings;
 import nu.marginalia.language.keywords.KeywordHasher;
 import nu.marginalia.model.id.UrlIdCodec;
 import nu.marginalia.model.processed.SlopDocumentRecord;
@@ -36,6 +36,7 @@ class ForwardIndexConverterTest {
     private Path docsFileId;
     private Path docsFileData;
     private Path docsSpanData;
+    private Path docsTextData;
 
     int workSetSize = 512;
 
@@ -61,6 +62,7 @@ class ForwardIndexConverterTest {
         docsFileId = dataDir.resolve("docs-i.dat");
         docsFileData = dataDir.resolve("docs-d.dat");
         docsSpanData = dataDir.resolve("docs-s.dat");
+        docsTextData = dataDir.resolve("docs-t.dat");
     }
 
     @AfterEach
@@ -82,12 +84,14 @@ class ForwardIndexConverterTest {
                         id%3,
                         id%5,
                         15,
+                        0,
                         "en",
                         List.of(),
                         new long[0],
                         List.of(),
                         new byte[0],
-                        List.of()
+                        List.of(),
+                        new byte[0]
                 ),
                 new KeywordHasher.AsciiIsh());
 
@@ -101,10 +105,11 @@ class ForwardIndexConverterTest {
                 docsFileId,
                 docsFileData,
                 docsSpanData,
+                docsTextData,
                 IndexJournal.findJournal(workDir, "en").stream().toList(),
                 new DomainRankings()).convert();
 
-        var forwardReader = new ForwardIndexReader(docsFileId, docsFileData, docsSpanData);
+        var forwardReader = new ForwardIndexReader(docsFileId, docsFileData, docsSpanData, docsTextData);
 
         for (int i = 36; i < workSetSize; i++) {
             long docId = createId(i, i/20);

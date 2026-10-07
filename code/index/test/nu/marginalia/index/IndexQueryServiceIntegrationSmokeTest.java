@@ -4,8 +4,7 @@ import com.google.inject.Guice;
 import com.google.inject.Inject;
 import nu.marginalia.IndexLocations;
 import nu.marginalia.api.searchquery.*;
-import nu.marginalia.api.searchquery.model.query.*;
-import nu.marginalia.api.searchquery.model.results.PrototypeRankingParameters;
+import nu.marginalia.api.searchquery.model.compiled.CompiledQuery;
 import nu.marginalia.index.config.IndexFileName;
 import nu.marginalia.index.forward.construction.ForwardIndexConverter;
 import nu.marginalia.index.journal.IndexJournal;
@@ -13,7 +12,7 @@ import nu.marginalia.index.journal.IndexJournalSlopWriter;
 import nu.marginalia.index.reverse.construction.DocIdRewriter;
 import nu.marginalia.index.reverse.construction.full.FullIndexConstructor;
 import nu.marginalia.index.reverse.construction.prio.PrioIndexConstructor;
-import nu.marginalia.index.searchset.DomainRankings;
+import nu.marginalia.ranking.DomainRankings;
 import nu.marginalia.language.keywords.KeywordHasher;
 import nu.marginalia.linkdb.docs.DocumentDbReader;
 import nu.marginalia.linkdb.docs.DocumentDbWriter;
@@ -125,7 +124,7 @@ IndexQueryServiceIntegrationSmokeTest {
                         .setSearchSetIdentifier("NONE")
                         .setHumanQuery("2 3 5 -4")
                         .setTerms(RpcQueryTerms.newBuilder()
-                                .setCompiledQuery("2 3 5")
+                                .setCompiledQuery(compiledQuery("2", "3", "5"))
                                 .addAllTermsQuery(List.of("5", "3", "2"))
                                 .addTermsExclude("4")
                                 .addPhrases(RpcPhrases
@@ -187,7 +186,7 @@ IndexQueryServiceIntegrationSmokeTest {
                         .setSearchSetIdentifier("NONE")
                         .setHumanQuery("2")
                         .setTerms(RpcQueryTerms.newBuilder()
-                                .setCompiledQuery("2")
+                                .setCompiledQuery(compiledQuery("2"))
                                 .addAllTermsQuery(List.of("2"))
                                 .addPhrases(RpcPhrases
                                         .newBuilder()
@@ -245,7 +244,7 @@ IndexQueryServiceIntegrationSmokeTest {
                         .setHumanQuery("2")
                         .addRequiredDomainIds(2)
                         .setTerms(RpcQueryTerms.newBuilder()
-                                .setCompiledQuery("2 3 5")
+                                .setCompiledQuery(compiledQuery("2", "3", "5"))
                                 .addAllTermsQuery(List.of("5", "3", "2"))
                                 .addTermsExclude("4")
                                 .addPhrases(RpcPhrases
@@ -315,7 +314,7 @@ IndexQueryServiceIntegrationSmokeTest {
                                 .build()
                         )
                         .setTerms(RpcQueryTerms.newBuilder()
-                                .setCompiledQuery("4")
+                                .setCompiledQuery(compiledQuery("4"))
                                 .addAllTermsQuery(List.of("4"))
                                 .addPhrases(RpcPhrases
                                         .newBuilder()
@@ -391,11 +390,13 @@ IndexQueryServiceIntegrationSmokeTest {
         Path outputFileDocsId = IndexFileName.resolve(IndexLocations.getCurrentIndex(fileStorageService), new IndexFileName.ForwardDocIds(), IndexFileName.Version.NEXT);
         Path outputFileDocsData = IndexFileName.resolve(IndexLocations.getCurrentIndex(fileStorageService), new IndexFileName.ForwardDocData(), IndexFileName.Version.NEXT);
         Path outputFileSpansData = IndexFileName.resolve(IndexLocations.getCurrentIndex(fileStorageService), new IndexFileName.ForwardSpansData(), IndexFileName.Version.NEXT);
+        Path outputFileDocTextsData = IndexFileName.resolve(IndexLocations.getCurrentIndex(fileStorageService), new IndexFileName.ForwardDocTextsData(), IndexFileName.Version.NEXT);
 
         ForwardIndexConverter converter = new ForwardIndexConverter(new FakeProcessHeartbeat(),
                 outputFileDocsId,
                 outputFileDocsData,
                 outputFileSpansData,
+                outputFileDocTextsData,
                 IndexJournal.findJournal(workDir, "en").stream().toList(),
                 domainRankings
         );
@@ -417,7 +418,7 @@ IndexQueryServiceIntegrationSmokeTest {
 
         ldbw.add(new DocdbUrlDetail(
                 fullId, new EdgeUrl("https://www.example.com/"+id),
-                "test", "test", "en", 0., "HTML5", 0, null, fullId, 10
+                "test", "en", 0., "HTML5", 0, null, fullId, 10
         ));
 
         List<String> keywords = IntStream.of(factors).mapToObj(Integer::toString).toList();
@@ -440,12 +441,14 @@ IndexQueryServiceIntegrationSmokeTest {
                         0,
                         new DocumentMetadata(0, 0, 0, 0, id % 5, id, id % 20, (byte) 0).encode(),
                         100,
+                        0,
                         "en",
                         keywords,
                         metadata,
                         positions,
                         new byte[0],
-                        List.of()
+                        List.of(),
+                        new byte[0]
                 ), new KeywordHasher.AsciiIsh());
 
     }
@@ -456,7 +459,7 @@ IndexQueryServiceIntegrationSmokeTest {
 
         ldbw.add(new DocdbUrlDetail(
                 fullId, new EdgeUrl("https://www.example.com/"+id),
-                "test", "test", "en", 0., "HTML5", 0, null, id, 10
+                "test", "en", 0., "HTML5", 0, null, id, 10
         ));
 
 
@@ -480,14 +483,20 @@ IndexQueryServiceIntegrationSmokeTest {
                         0,
                         new DocumentMetadata(0, 0, 0, 0, id % 5, id, id % 20, (byte) 0).encode(),
                         100,
+                        0,
                         "en",
                         keywords,
                         metadata,
                         positions,
                         new byte[0],
-                        List.of()
+                        List.of(),
+                        new byte[0]
                 ), new KeywordHasher.AsciiIsh());
 
     }
 
+
+    private static RpcCompiledQuery compiledQuery(String... terms) {
+        return IndexProtobufCodec.convertCompiledQuery(CompiledQuery.just(terms));
+    }
 }

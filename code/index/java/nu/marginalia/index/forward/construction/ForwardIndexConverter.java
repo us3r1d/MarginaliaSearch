@@ -4,14 +4,18 @@ import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import nu.marginalia.array.LongArray;
 import nu.marginalia.array.LongArrayFactory;
 import nu.marginalia.index.config.ForwardIndexParameters;
+import nu.marginalia.index.forward.doctext.DocTextsWriter;
 import nu.marginalia.index.forward.spans.IndexSpansWriter;
 import nu.marginalia.index.journal.IndexJournal;
 import nu.marginalia.index.journal.IndexJournalPage;
-import nu.marginalia.index.searchset.DomainRankings;
+import nu.marginalia.index.model.FeaturesCodec;
+import nu.marginalia.ranking.DomainRankings;
 import nu.marginalia.model.id.UrlIdCodec;
 import nu.marginalia.model.idx.DocumentMetadata;
 import nu.marginalia.process.control.ProcessHeartbeat;
+import nu.marginalia.sequence.slop.VarintCodedSequenceArrayColumn;
 import nu.marginalia.slop.SlopTable;
+import nu.marginalia.slop.column.array.ByteArrayColumn;
 import nu.marginalia.slop.column.primitive.LongColumn;
 import org.roaringbitmap.longlong.LongConsumer;
 import org.roaringbitmap.longlong.Roaring64Bitmap;
@@ -25,9 +29,13 @@ import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
 
+import static nu.marginalia.index.config.ForwardIndexParameters.ForwardIndexVersion.*;
+
 public class ForwardIndexConverter {
 
     private final ProcessHeartbeat heartbeat;
+
+    private static final ForwardIndexParameters.ForwardIndexVersion VERSION = V2026_08__1;
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
@@ -37,11 +45,13 @@ public class ForwardIndexConverter {
     private final DomainRankings domainRankings;
 
     private final Path outputFileSpansData;
+    private final Path outputFileDocTextsData;
 
     public ForwardIndexConverter(ProcessHeartbeat heartbeat,
                                  Path outputFileDocsId,
                                  Path outputFileDocsData,
                                  Path outputFileSpansData,
+                                 Path outputFileDocTextsData,
                                  Collection<IndexJournal> journals,
                                  DomainRankings domainRankings
                                  ) {
@@ -49,6 +59,7 @@ public class ForwardIndexConverter {
         this.outputFileDocsId = outputFileDocsId;
         this.outputFileDocsData = outputFileDocsData;
         this.outputFileSpansData = outputFileSpansData;
+        this.outputFileDocTextsData = outputFileDocTextsData;
         this.journals = journals;
         this.domainRankings = domainRankings;
     }
@@ -68,7 +79,8 @@ public class ForwardIndexConverter {
         logger.info("Domain Rankings size = {}", domainRankings.size());
 
         try (var progress = heartbeat.createProcessTaskHeartbeat(TaskSteps.class, "forwardIndexConverter");
-             var spansWriter = new IndexSpansWriter(outputFileSpansData)
+             var spansWriter = new IndexSpansWriter(outputFileSpansData);
+             var docTextsWriter = new DocTextsWriter(outputFileDocTextsData)
         ) {
             progress.progress(TaskSteps.GET_DOC_IDS);
 
@@ -85,7 +97,10 @@ public class ForwardIndexConverter {
 
             // docIdToIdx -> file offset for id
 
-            LongArray docFileData = LongArrayFactory.mmapForWritingConfined(outputFileDocsData, ForwardIndexParameters.ENTRY_SIZE * docsFileId.size());
+            final int entrySize = VERSION.entrySize;
+
+            LongArray docFileData = LongArrayFactory.mmapForWritingConfined(outputFileDocsData,
+                    entrySize * docsFileId.size() + 1 /* <-- footer */);
 
             ByteBuffer workArea = ByteBuffer.allocate(1024*1024*100);
             for (IndexJournal journal : journals) {
@@ -95,46 +110,50 @@ public class ForwardIndexConverter {
                         var metaReader = instance.openDocumentMeta(slopTable);
                         var featuresReader = instance.openFeatures(slopTable);
                         var sizeReader = instance.openSize(slopTable);
+                        var pubDateReader = instance.openPubDate(slopTable);
 
                         var spansCodesReader = instance.openSpanCodes(slopTable);
                         var spansSeqReader = instance.openSpans(slopTable);
+                        var docTextZstdReader = instance.openDocumentTextZstd(slopTable);
 
                         while (docIdReader.hasRemaining()) {
                             long docId = docIdReader.get();
                             int domainId = UrlIdCodec.getDomainId(docId);
 
-                            long entryOffset = (long) ForwardIndexParameters.ENTRY_SIZE * docIdToIdx.get(docId);
+                            long entryOffset = (long) entrySize * docIdToIdx.get(docId);
 
                             int ranking = domainRankings.getRanking(domainId);
                             long meta = DocumentMetadata.encodeRank(metaReader.get(), ranking);
 
                             final int docFeatures = featuresReader.get();
                             final int docSize = sizeReader.get();
+                            final short pubDate = pubDateReader.get();
 
-                            long features = docFeatures | ((long) docSize << 32L);
+                            long features = FeaturesCodec.encode(
+                                    docFeatures,
+                                    docSize,
+                                    pubDate);
 
-                            // Write spans data
-                            byte[] spansCodes = spansCodesReader.get();
+                            // Write spans
+                            long encodedSpansOffset = writeSpans(spansWriter, workArea, spansCodesReader, spansSeqReader);
 
-                            spansWriter.beginRecord(spansCodes.length);
-                            workArea.clear();
-                            List<ByteBuffer> spans = spansSeqReader.getData(workArea);
-
-                            for (int i = 0; i < spansCodes.length; i++) {
-                                spansWriter.writeSpan(spansCodes[i], spans.get(i));
-                            }
-                            long encodedSpansOffset = spansWriter.endRecord();
-
+                            // Write the compressed document text
+                            long encodedDocTextOffset = docTextsWriter.write(docTextZstdReader.get());
 
                             // Write the principal forward documents file
                             docFileData.set(entryOffset + ForwardIndexParameters.METADATA_OFFSET, meta);
                             docFileData.set(entryOffset + ForwardIndexParameters.FEATURES_OFFSET, features);
                             docFileData.set(entryOffset + ForwardIndexParameters.SPANS_OFFSET, encodedSpansOffset);
+                            docFileData.set(entryOffset + ForwardIndexParameters.DOC_TEXT_OFFSET, encodedDocTextOffset);
 
                         }
                     }
                 }
             }
+
+            docFileData.set(docFileData.size() - 1,
+                    ForwardIndexParameters.encodeFooter(VERSION)
+            );
 
             progress.progress(TaskSteps.FORCE);
 
@@ -155,6 +174,26 @@ public class ForwardIndexConverter {
             logger.error("Failed to convert", ex);
             throw ex;
         }
+    }
+
+    private static long writeSpans(IndexSpansWriter spansWriter,
+                                   ByteBuffer workArea,
+                                   ByteArrayColumn.Reader spansCodesReader,
+                                   VarintCodedSequenceArrayColumn.Reader spansSeqReader) throws IOException {
+
+        byte[] spansCodes = spansCodesReader.get();
+
+        // Start a new record
+        spansWriter.beginRecord(spansCodes.length);
+
+        // For each span, write its code and start,end pairs
+        List<ByteBuffer> spans = spansSeqReader.getData(workArea);
+        for (int i = 0; i < spansCodes.length; i++) {
+            spansWriter.writeSpan(spansCodes[i], spans.get(i));
+        }
+
+        // Finalize the record
+        return spansWriter.endRecord();
     }
 
     private LongArray getDocIds(Path outputFileDocs, Collection<IndexJournal> journalReaders) throws IOException {
@@ -187,6 +226,7 @@ public class ForwardIndexConverter {
     private void deleteOldFiles() throws IOException {
         Files.deleteIfExists(outputFileDocsId);
         Files.deleteIfExists(outputFileDocsData);
+        Files.deleteIfExists(outputFileDocTextsData);
     }
 
 }
